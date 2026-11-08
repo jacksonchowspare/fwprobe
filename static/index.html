@@ -15,15 +15,15 @@
   }
   /* 白天模式：柔和纸张灰蓝 —— 底色/卡片都不走纯白，整体亮度降一档（4K 屏久看不刺眼） */
   body[data-theme="light"]{
-    --bg:#d8dde4; --card:rgba(236,239,243,.92); --solid:#eaeef2; --border:rgba(15,23,42,.13);
-    --text:#1a2230; --muted:#5a6472; --accent:#2b66e0; --ok:#14713a; --warn:#8f5a06; --bad:#b3372a;
-    --track:rgba(15,23,42,.12); --hover:rgba(15,23,42,.06);
-    --shadow:0 6px 18px rgba(15,23,42,.09), inset 0 1px 0 rgba(255,255,255,.5);
+    --bg:#cfd5dd; --card:rgba(228,232,237,.92); --solid:#e0e5ea; --border:rgba(15,23,42,.14);
+    --text:#18202c; --muted:#535e6c; --accent:#2a62d8; --ok:#106636; --warn:#835104; --bad:#a93326;
+    --track:rgba(15,23,42,.13); --hover:rgba(15,23,42,.065);
+    --shadow:0 6px 18px rgba(15,23,42,.10), inset 0 1px 0 rgba(255,255,255,.45);
     --t1:#047857; --t2:#16a34a; --t3:#65a30d; --t4:#ca8a04; --t5:#e11d48;
     /* 光晕减半：原来的 16% / 10% 在浅底上等于给整页加了一层高光 */
     background:
-      radial-gradient(900px 500px at 8% -10%, rgba(61,139,253,.05), transparent 60%),
-      radial-gradient(700px 420px at 100% 0%, rgba(34,197,94,.03), transparent 55%), var(--bg);
+      radial-gradient(900px 500px at 8% -10%, rgba(61,139,253,.04), transparent 60%),
+      radial-gradient(700px 420px at 100% 0%, rgba(34,197,94,.02), transparent 55%), var(--bg);
     background-attachment:fixed;
   }
   *{box-sizing:border-box}
