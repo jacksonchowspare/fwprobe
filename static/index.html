@@ -1,3 +1,10 @@
+  .strip{display:block;width:100%;height:12px;overflow:visible}
+  /* 最右一格「正在监测」：实心发光 + 明暗呼吸，不会看成缺口 */
+  .strip rect.live{animation:liveGlow 1.8s ease-in-out infinite}
+  @keyframes liveGlow{
+    0%,100%{filter:brightness(1);stroke-width:0}
+    50%{filter:brightness(1.45);stroke:#fff;stroke-width:.5}
+  }
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -262,29 +269,37 @@ const LOSS_COLOR = (loss, ok) => !ok ? "var(--muted)"
 
 const CELLS = 20;   // 20 格 = 最近 20 次探测（30s 一次 → 约 10 分钟，每分钟走 2 格）
 
-/* 滚动历史条：旧的在左、最新在右（新数据从右边进来，整体往左推） */
+/* 滚动历史条：旧的在左、最新在右（新数据从右边进来，整体往左推）。
+   用 SVG 按 viewBox 等分画格子 —— 不依赖 flex 的亚像素取整，缩放和不同 DPR 下缝隙都均匀 */
 function strip(hist, kind, n) {
   n = n || CELLS;
   const arr = (hist || []).slice(-n);
   const pad = Math.max(0, n - arr.length);
-  let out = '<span class="cells">';
-  for (let i = 0; i < pad; i++) out += "<i></i>";
-  arr.forEach(h => {
-    const hm = new Date((h.ts || 0) * 1000);
-    const hhmm = String(hm.getHours()).padStart(2, "0") + ":" + String(hm.getMinutes()).padStart(2, "0");
-    let color, tip;
-    if (kind === "lat") {
-      const ms = h.ok ? (h.min != null ? h.min : h.avg) : null;
-      color = ms == null ? "var(--muted)" : LAT_COLOR(ms);
-      tip = ms == null ? `${hhmm} 超时` : `${hhmm} ${Math.round(ms)} ms`;
-    } else {
-      color = LOSS_COLOR(h.loss || 0, h.ok);
-      tip = h.ok ? `${hhmm} 丢包 ${(h.loss || 0).toFixed(0)}%` : `${hhmm} 超时`;
+  const seg = 100 / n;
+  const gap = seg * 0.16;
+  let rects = "";
+  for (let i = 0; i < n; i++) {
+    const h = arr[i - pad];
+    const last = i === n - 1;
+    let color = "var(--track)";
+    let tip = "无数据";
+    if (h) {
+      const hm = new Date((h.ts || 0) * 1000);
+      const hhmm = String(hm.getHours()).padStart(2, "0") + ":" + String(hm.getMinutes()).padStart(2, "0");
+      if (kind === "lat") {
+        const ms = h.ok ? (h.min != null ? h.min : h.avg) : null;
+        color = ms == null ? "var(--muted)" : LAT_COLOR(ms);
+        tip = ms == null ? hhmm + " 超时" : hhmm + " " + Math.round(ms) + " ms";
+      } else {
+        color = LOSS_COLOR(h.loss || 0, h.ok);
+        tip = h.ok ? hhmm + " 丢包 " + (h.loss || 0).toFixed(0) + "%" : hhmm + " 超时";
+      }
     }
-    const isLast = h === arr[arr.length - 1];
-    out += `<i${isLast ? ' class="live"' : ""} title="${tip}" style="background:${color}"></i>`;
-  });
-  return out + "</span>";
+    rects += "<rect x=\"" + (i * seg + gap / 2).toFixed(3) + "\" y=\"0\" width=\"" + (seg - gap).toFixed(3)
+      + "\" height=\"10\" rx=\"0.8\" fill=\"" + color + "\"" + (last ? ' class="live"' : "")
+      + "><title>" + tip + "</title></rect>";
+  }
+  return "<svg class=\"strip\" viewBox=\"0 0 100 10\" preserveAspectRatio=\"none\">" + rects + "</svg>";
 }
 
 let NODES = [], OFFLINE_AFTER = 120, LAST_OK = 0;
@@ -358,7 +373,7 @@ function card(n) {
       <span>UDP 连接 <b>${s.udp == null ? "-" : s.udp}</b></span></div>
     <div class="lat">
       <div class="lat-cap">三网延迟 · 最近 20 次探测（每格 1 分钟）</div>
-      ${lat || '<div class="r"><span class="name">探测</span><span class="cells"></span><span class="ms">-</span><span class="cells"></span><span class="loss">-</span></div>'}
+      ${lat || '<div class="r"><span class="name">探测</span><svg class="strip" viewBox="0 0 100 10" preserveAspectRatio="none"></svg><span class="ms">-</span><svg class="strip" viewBox="0 0 100 10" preserveAspectRatio="none"></svg><span class="loss">-</span></div>'}
     </div>
     <div class="foot">
       <span>在线 <b>${n.online ? fmtDur(s.uptime) : "-"}</b></span>
