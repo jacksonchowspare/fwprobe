@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 APP_NAME = "fwprobe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

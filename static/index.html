@@ -30,6 +30,9 @@
   header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
   h1{font-size:19px;margin:0;letter-spacing:.3px}
   .ver{color:var(--muted);font-size:12px}
+  #totals{font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
+    padding-right:9px;margin-right:2px;border-right:1px solid var(--border)}
+  #totals b{font-weight:600;color:var(--text)}
   #refreshed{display:inline-flex;align-items:center;gap:5px}
   #refreshed span{font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
     display:inline-block;min-width:9.5ch;text-align:left}
@@ -151,6 +154,7 @@
     <h1>fwprobe · 节点状态</h1>
     <span class="ver" id="ver"></span>
     <div class="top-actions">
+      <span class="ver" id="totals" title="所有节点累计流量"></span>
       <span class="ver" id="refreshed"><i class="dot"></i><span>加载中</span></span>
       <span class="ver" id="meta"></span>
       <button id="theme_btn" onclick="toggleTheme()">白天模式</button>
@@ -460,9 +464,22 @@ function renderFilters() {
 }
 function clearGroups() { FILTER.groups.clear(); writeFilterToUrl(); renderFilters(); renderSummary(); }
 
+function renderTotals(list) {
+  const el = $("totals");
+  if (!el) return;
+  const tx = list.reduce((a, n) => a + (n.tx_total || 0), 0);
+  const rx = list.reduce((a, n) => a + (n.rx_total || 0), 0);
+  const rtx = list.reduce((a, n) => a + ((n.sample || {}).tx_bps || 0), 0);
+  const rrx = list.reduce((a, n) => a + ((n.sample || {}).rx_bps || 0), 0);
+  const scope = (FILTER.region || FILTER.groups.size) ? `筛选内 ${list.length} 台` : `全部 ${list.length} 台`;
+  el.title = `${scope}累计流量｜实时 ↑ ${fmtSpeed(rtx)} ↓ ${fmtSpeed(rrx)}`;
+  el.innerHTML = `总流量 ↑ <b>${fmtBytes(tx)}</b> ↓ <b>${fmtBytes(rx)}</b>`;
+}
+
 function renderSummary() {
   const all = NODES || [];
   const list = visibleNodes();
+  renderTotals(list);
   $("meta").textContent = `${all.filter(n => n.online).length}/${all.length} 在线`;
   renderFilters();
   $("nodes").innerHTML = list.length ? list.map(card).join("")
