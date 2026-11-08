@@ -92,7 +92,19 @@
   .spark{width:100%;height:16px;display:block;margin-top:3px;opacity:.9}
   .kvline{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-top:11px}
   .kvline b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
-  .lat{margin-top:11px;border-top:1px dashed var(--border);padding-top:9px;display:flex;flex-direction:column;gap:6px}
+  .lat{margin-top:11px;border-top:1px dashed var(--border);padding-top:9px}
+  .tpanels{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:7px}
+  .tpanel{background:var(--hover);border-radius:9px;padding:7px 8px 8px;min-width:0}
+  .thead{display:flex;justify-content:space-between;align-items:baseline;font-size:10.5px;color:var(--muted);margin-bottom:6px}
+  .thead span:last-child{opacity:.6}
+  .trow{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .trow + .trow{margin-top:6px}
+  .trow-h{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:11px;line-height:1.25}
+  .trow-h .name{display:flex;align-items:center;gap:4px;color:var(--muted);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .trow-h .dot{width:6px;height:6px;border-radius:50%;flex:none}
+  .trow-h .v{font-variant-numeric:tabular-nums;font-weight:600;color:var(--text);white-space:nowrap}
+  .trow-h .v.ok{color:var(--ok)} .trow-h .v.warn{color:var(--warn)} .trow-h .v.bad{color:var(--bad)}
+  @media (max-width:860px){ .tpanels{grid-template-columns:1fr;gap:8px} }
   .lat-cap{font-size:10.5px;color:var(--muted);opacity:.85;letter-spacing:.2px;margin-bottom:2px}
   .lat .r{display:grid;grid-template-columns:auto minmax(0,1fr) 48px minmax(0,1fr) 34px;
     align-items:center;gap:7px;font-size:12px}
@@ -100,7 +112,7 @@
   .lat .ms{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
   .lat .loss{text-align:right;white-space:nowrap}
   .lat .ms.ok{color:var(--ok)} .lat .ms.warn{color:var(--warn)} .lat .ms.bad{color:var(--bad)}
-  .strip{display:block;width:100%;height:12px;overflow:visible}
+  .strip{display:block;width:100%;height:12px;overflow:visible;margin:0}
   /* 最右一格「正在监测」：实心发光 + 明暗呼吸，不会看成缺口 */
   /* 最右一格「正在监测」：只做透明度呼吸，不改描边/亮度——
      之前加了 filter 和白色描边，会让这一格视觉上比别的格子大一圈 */
@@ -375,37 +387,38 @@ function strip(hist, kind, n) {
   return `<svg class="strip" data-sid="${sid}" viewBox="0 0 100 10" preserveAspectRatio="none"></svg>`;
 }
 
-/* 按「设备像素」重排格子：viewBox 直接设成设备像素尺寸，每格坐标取整。
-   这样 125%/150% 这类非整数缩放下，格子高度和缝隙都是整数设备像素，
-   不会出现有的格子被抗锯齿糊掉、有的清晰（亮度高的红/黄看着更高也来自这里）。 */
+/* 按「设备像素」重排格子：正方形 + 加大间距。
+   边长由可用宽度反推（s = (W - (n-1)*g) / n），整行水平居中，垂直在 12px 行高里居中。
+   坐标全部取整 → 125%/150% 这类非整数缩放下也齐平，不会被抗锯齿描边（这就是「红色看着高一块」的来源）。 */
 function layoutStrips() {
   const dpr = window.devicePixelRatio || 1;
+  const MAX_SIDE = Math.round(12 * dpr);        // 方块最大 12 CSS px
   document.querySelectorAll("svg.strip").forEach(svg => {
     const cells = STRIP_CELLS[svg.dataset.sid];
     if (!cells || !cells.length) return;
-    svg.style.width = "100%";                       // 先恢复自适应宽度再量
+    svg.style.width = "100%";                   // 先恢复自适应宽度再量
     const cssW = svg.clientWidth || (svg.parentNode && svg.parentNode.clientWidth) || 0;
-    const cssH = svg.clientHeight || 12;
     if (!cssW) return;
     const n = cells.length;
     const W = Math.max(n * 2, Math.round(cssW * dpr));
-    const H = Math.max(4, Math.round(cssH * dpr));
-    // 宽度必须精确等于 W/dpr：否则 viewBox 的 165 个设备像素被塞进 164.6 个实际像素里，
-    // 整体缩放 0.9976 → 缝隙又被抗锯齿糊住、格子宽度不均
-    svg.style.width = (W / dpr) + "px";
+    svg.style.width = (W / dpr) + "px";         // viewBox 与实际像素必须 1:1
+
     const seg = W / n;
-    const g = Math.max(1, Math.round(seg * 0.16));
+    const g = Math.max(Math.round(2 * dpr), Math.round(seg * 0.34));   // 缝隙明显加大
+    const side = Math.max(2, Math.min(MAX_SIDE, Math.floor((W - (n - 1) * g) / n)));
+    const used = n * side + (n - 1) * g;
+    const x0 = Math.round((W - used) / 2);
+
     let rects = "";
     for (let i = 0; i < n; i++) {
-      const x = Math.round(i * seg + g / 2);
-      const r = (i === n - 1) ? Math.round(W - g / 2) : Math.round((i + 1) * seg - g / 2);
       const c = cells[i];
-      rects += `<rect x="${x}" y="0" width="${Math.max(1, r - x)}" height="${H}" fill="${c.c}"`
+      rects += `<rect x="${x0 + i * (side + g)}" y="0" width="${side}" height="${side}" fill="${c.c}"`
         + (c.live ? ' class="live"' : "") + `><title>${esc(c.t)}</title></rect>`;
     }
-    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("viewBox", `0 0 ${W} ${side}`);
+    svg.style.height = (side / dpr) + "px";     // 行高 = 方块边长
     svg.setAttribute("shape-rendering", "crispEdges");
-    svg.innerHTML = rects;      // 宽度保持 CSS 的 100%，只在 viewBox 里用设备像素
+    svg.innerHTML = rects;
   });
 }
 
@@ -428,19 +441,22 @@ function card(n) {
   const quotaPct = quota ? Math.min(100, 100 * used / quota) : 0;
   const fam = (n.checks || []).some(c => String(c.family) === "6") ? "v6" : "v4";
   const three = n.three || {targets: {}};
-  const lat = (n.checks || []).map(c => {
+  const carriers = (n.checks || []).map(c => {
     const t = (three.targets || {})[c.name] || {};
-    const ms = t.avg_latency == null ? null : t.avg_latency;
-    const loss = t.avg_loss == null ? null : t.avg_loss;
-    const b = t.buckets || [];
-    return `<div class="r">
-      <span class="name">${esc(c.name)}</span>
-      ${strip(b, "lat")}
-      <span class="ms ${LAT_CLASS(ms)}">${ms == null ? "-" : Math.round(ms) + " ms"}</span>
-      ${strip(b, "loss")}
-      <span class="loss ${loss != null && loss > 9 ? "bad" : ""}">${loss == null ? "-" : loss.toFixed(1) + "%"}</span>
-    </div>`;
-  }).join("");
+    return { name: c.name,
+             ms: t.avg_latency == null ? null : t.avg_latency,
+             loss: t.avg_loss == null ? null : t.avg_loss,
+             b: t.buckets || [] };
+  });
+  const rowHead = (c, val) => `<div class="trow-h">
+      <span class="name"><i class="dot" style="background:${carrierColor(c.name)}"></i>${esc(c.name)}</span>
+      <b class="v ${val.cls}">${val.text}</b></div>`;
+  const lat = carriers.map(c => `<div class="trow">
+      ${rowHead(c, { cls: LAT_CLASS(c.ms), text: c.ms == null ? "-" : Math.round(c.ms) + " ms" })}
+      ${strip(c.b, "lat")}</div>`).join("");
+  const loss = carriers.map(c => `<div class="trow">
+      ${rowHead(c, { cls: (c.loss != null && c.loss > 9) ? "bad" : "", text: c.loss == null ? "-" : c.loss.toFixed(1) + "%" })}
+      ${strip(c.b, "loss")}</div>`).join("");
   return `<div class="card" onclick="openDetail('${n.id}')">
     <div class="head">
       <span class="flag">${flag(n.country)}</span>
@@ -490,7 +506,10 @@ function card(n) {
       <span>UDP 连接 <b>${s.udp == null ? "-" : s.udp}</b></span></div>
     <div class="lat">
       <div class="lat-cap">三网延迟 · 最近 1 小时（每格 3 分钟，显示平均延迟 / 平均丢包）</div>
-      ${lat || '<div class="r"><span class="name">探测</span><svg class="strip" viewBox="0 0 100 10" preserveAspectRatio="none"></svg><span class="ms">-</span><svg class="strip" viewBox="0 0 100 10" preserveAspectRatio="none"></svg><span class="loss">-</span></div>'}
+      ${carriers.length ? `<div class="tpanels">
+        <div class="tpanel"><div class="thead"><span>延迟</span><span>ms</span></div>${lat}</div>
+        <div class="tpanel"><div class="thead"><span>丢包</span><span>%</span></div>${loss}</div>
+      </div>` : '<div class="lat-cap" style="margin:0">未配置三网探测</div>'}
     </div>
     <div class="foot">
       <span>在线 <b>${n.online ? fmtDur(s.uptime) : "-"}</b></span>
