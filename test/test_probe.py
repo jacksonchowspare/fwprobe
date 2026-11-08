@@ -561,7 +561,25 @@ class TestHTTP(unittest.TestCase):
         self.assertTrue(self.st.del_ptoken(pid))
         self.assertIsNone(self.st.find_ptoken(tok))
 
-    def test_provision_list_and_remove(self):
+    def test_country_gb_canonicalised_to_uk(self):
+        """英国统一显示 UK：存储层归一化（旗帜仍按 GB 算），老数据自动迁移"""
+        self.assertEqual(P.norm_country("GB"), "UK")
+        self.assertEqual(P.norm_country("gb"), "UK")
+        self.assertEqual(P.norm_country("UK"), "UK")
+        self.assertEqual(P.norm_country("hk"), "HK")
+        self.assertEqual(P.norm_country(""), "")
+        # 后台手动填 GB 也存成 UK
+        nid, _ = self.st.add_node("伦敦-London", "UK")
+        code, body = self._post(f"/api/nodes/{nid}", {"country": "gb"}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.st.node(nid)["country"], "UK")
+        # 老库里是 GB 的，下次启动自动迁到 UK
+        self.st.conn.execute("UPDATE nodes SET country='GB' WHERE id=?", (nid,))
+        self.st.conn.commit()
+        again = P.Store(os.path.join(self.dir, "t.db"))     # 重新打开即触发迁移
+        self.assertEqual(again.node(nid)["country"], "UK")
+        again.conn.close()
+
         """供应令牌：能列出自己建的节点，也能在卸载探针后删节点（面板「卸载探针」用）"""
         _, tok = self.st.add_ptoken("fwpanel2")
         code, body = self._post("/api/provision/node", {"alias": "面板建的A"}, token=tok, csrf=False)

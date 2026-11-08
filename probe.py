@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.12"
+VERSION = "0.5.13"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -433,6 +433,8 @@ class Store:
         if "src" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN src TEXT DEFAULT ''")
             self.conn.commit()
+        self.conn.execute("UPDATE nodes SET country='UK' WHERE UPPER(country)='GB'")
+        self.conn.commit()
 
     def nodes(self):
         with self.lock:
@@ -773,6 +775,18 @@ COUNTRY_CACHE = {}
 COUNTRY_DONE = set()
 
 
+# 英国两种写法都存在（ISO 是 GB，口语/分组常用 UK）。展示层统一用 UK：
+# 旗帜仍按 GB 算（🇺🇰 不是合法旗帜），所以归一化放在「存储」这一层，界面只认 UK。
+CC_CANON = {"GB": "UK", "EL": "GR"}
+
+
+def norm_country(code: str) -> str:
+    c = (code or "").strip().upper()
+    if not c:
+        return ""
+    return CC_CANON.get(c, c[:2])
+
+
 def lookup_country(ip: str):
     """按 IP 查国家代码（只在新节点首次上报时查一次，失败静默）。
 
@@ -802,6 +816,7 @@ def lookup_country(ip: str):
             else:
                 code = body[:2].upper()
             if len(code) == 2 and code.isalpha():
+                code = norm_country(code)
                 if not self_lookup:
                     COUNTRY_CACHE[ip] = code
                 return code
@@ -1243,6 +1258,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"id": nid, "token": tok})
             nid = rest
             data = self._json_body() or {}
+            if "country" in data:
+                data["country"] = norm_country(data.get("country") or "")
             if not self.store.update_node(nid, **data):
                 return self._send(404, {"error": "节点不存在或无有效字段"})
             node = self.store.node(nid) or {}

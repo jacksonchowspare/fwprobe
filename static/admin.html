@@ -172,7 +172,7 @@
       <div class="f"><label>到期日</label><input id="ed_expires" type="date"></div>
     </div>
     <div class="f"><label>地区代码（两位，如 GB / HK / JP；留空 = 自动识别）</label>
-      <input id="ed_country" maxlength="2" placeholder="自动" style="text-transform:uppercase"></div>
+      <input id="ed_country" maxlength="2" placeholder="自动，如 UK/HK/JP" style="text-transform:uppercase"></div>
     <div class="f"><label>备注（只在后台可见）</label><input id="ed_note" placeholder="可选"></div>
     <div class="dlgfoot">
       <button onclick="closeMask('m_edit')">取消</button>
@@ -247,9 +247,12 @@ const fmtBytes = n => {
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return (v >= 100 ? Math.round(v) : v.toFixed(v >= 10 ? 1 : 2)) + " " + u[i];
 };
+// 英国存储用 UK（与分组文字一致），旗帜按 ISO 的 GB 算
+const FLAG_ALIAS = { UK: "GB" };
 const flag = c => {
-  const s = String(c || "").toUpperCase();
+  let s = String(c || "").toUpperCase();
   if (!/^[A-Z]{2}$/.test(s)) return "🌐";
+  s = FLAG_ALIAS[s] || s;
   return String.fromCodePoint(...[...s].map(ch => 127397 + ch.charCodeAt(0)));
 };
 function ago(ts) {

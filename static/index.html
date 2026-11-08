@@ -301,11 +301,14 @@ const ago = ts => {
   if (d < 86400) return Math.floor(d / 3600) + " 小时前";
   return Math.floor(d / 86400) + " 天前";
 };
+// 英国存储用 UK（与分组文字一致），但旗帜要按 ISO 的 GB 算（🇺🇰 不是合法旗帜）
+const FLAG_ALIAS = { UK: "GB" };
 const flag = cc => {
-  if (!cc || cc.length !== 2 || !/^[A-Za-z]{2}$/.test(cc)) return "🌐";
+  let s = String(cc || "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(s)) return "🌐";
+  s = FLAG_ALIAS[s] || s;
   const A = 0x1F1E6;
-  return String.fromCodePoint(A + cc.toUpperCase().charCodeAt(0) - 65,
-                              A + cc.toUpperCase().charCodeAt(1) - 65);
+  return String.fromCodePoint(A + s.charCodeAt(0) - 65, A + s.charCodeAt(1) - 65);
 };
 
 /* 单色 OS 图标：路径取自 simple-icons（官方品牌图形），fill 跟随主题色 */
