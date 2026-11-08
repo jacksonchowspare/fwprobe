@@ -1,4 +1,4 @@
-# fwprobe
+# iProbe
 
 自建的 VPS 探针：**agent 主动上报 + 公开状态页**。零第三方依赖（只用 Python 标准库 + 内置 sqlite3），
 服务端与采集端都是单文件脚本，一个 systemd 服务管住。

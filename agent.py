@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fwprobe agent —— 单文件探针采集端（零第三方依赖）
+"""iProbe agent —— 单文件探针采集端（零第三方依赖）
 
 采什么
 ------
@@ -37,7 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
@@ -523,7 +523,7 @@ def post_report(cfg, payload):
     url = cfg["server"] + "/api/report"
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + cfg["token"],
-               "User-Agent": f"fwprobe-agent/{VERSION}"}
+               "User-Agent": f"iProbe-agent/{VERSION}"}
     if len(data) > 4096:                     # 大包再压缩，小包不值得
         data = gzip.compress(data)
         headers["Content-Encoding"] = "gzip"
@@ -566,7 +566,7 @@ def spool_flush(cfg):
 
 # --------------------------------------------------------------------------- 主循环
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="agent.py", description=f"fwprobe agent {VERSION}")
+    ap = argparse.ArgumentParser(prog="agent.py", description=f"iProbe agent {VERSION}")
     ap.add_argument("--once", action="store_true", help="采一次并上报，打印结果")
     ap.add_argument("--print", dest="do_print", action="store_true", help="只打印采集结果，不上报")
     ap.add_argument("--config", default=CONFIG_PATH)
@@ -593,7 +593,7 @@ def main(argv=None):
         return 0
 
     interval = max(10, int(cfg.get("interval") or 30))
-    print(f"fwprobe agent {VERSION} 启动：每 {interval}s 上报到 {cfg.get('server')}", flush=True)
+    print(f"iProbe agent {VERSION} 启动：每 {interval}s 上报到 {cfg.get('server')}", flush=True)
     while True:
         t0 = time.time()
         try:

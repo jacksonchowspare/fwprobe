@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  fwprobe agent 安装脚本
+#  iProbe agent 安装脚本
 #
 #    curl -fsSL https://status.example.com/install-agent.sh | sudo bash -s -- \
 #         --token <节点token> [--server https://status.example.com]
@@ -51,7 +51,7 @@ die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行：curl -fsSL <中心>/install-agent.sh | sudo bash -s -- --token ..."
 
 if [ "$DO_UNINSTALL" = 1 ]; then
-  step "卸载 fwprobe agent"
+  step "卸载 iProbe agent"
   systemctl disable --now "$SERVICE" 2>/dev/null || true
   rm -f "$UNIT"; systemctl daemon-reload 2>/dev/null || true
   rm -rf "$AGENT_DIR" "$AGENT_ETC" "$AGENT_STATE"
@@ -117,7 +117,7 @@ ok "配置写入 $AGENT_ETC/config.json（权限 600）"
 step "4. 注册 systemd 服务"
 cat > "$UNIT" <<EOF
 [Unit]
-Description=fwprobe agent (VPS probe collector)
+Description=iProbe agent (VPS probe collector)
 After=network-online.target
 Wants=network-online.target
 

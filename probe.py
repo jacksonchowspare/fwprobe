@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fwprobe —— 自建 VPS 探针服务中心（agent 主动上报模型，零第三方依赖）
+"""iProbe —— 自建 VPS 探针服务中心（agent 主动上报模型，零第三方依赖）
 
 设计要点
 --------
@@ -34,8 +34,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.4.7"
-APP_NAME = "fwprobe"
+VERSION = "0.4.8"
+APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")

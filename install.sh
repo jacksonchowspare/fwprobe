@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  fwprobe 探针服务中心 · 安装/升级脚本
+#  iProbe 探针服务中心 · 安装/升级脚本
 #
 #  一键：
 #    curl -fsSL https://raw.githubusercontent.com/jacksonchowspare/fwprobe/main/install.sh | sudo bash
@@ -55,7 +55,7 @@ done
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行（sudo bash install.sh）"
 
 if [ "$MODE" = "uninstall" ] || [ "$MODE" = "purge" ]; then
-  step "卸载 fwprobe"
+  step "卸载 iProbe"
   systemctl disable --now "$SERVICE" 2>/dev/null || true
   rm -f "$UNIT"; systemctl daemon-reload 2>/dev/null || true
   rm -rf "$APP_DIR"
@@ -118,7 +118,7 @@ ok "配置 → $ETC_DIR/config.json（权限 600）"
 step "4. systemd 服务"
 cat > "$UNIT" <<EOF
 [Unit]
-Description=fwprobe (VPS probe center)
+Description=iProbe (VPS probe center)
 After=network-online.target
 Wants=network-online.target
 
@@ -153,7 +153,7 @@ rm -f /tmp/.fwprobe_health
 
 say ""
 say "=================================================================="
-say "  fwprobe 安装完成"
+say "  iProbe 安装完成"
 say "=================================================================="
 say "  监听      : http://$BIND:$PORT（不直接对公网）"
 say "  数据库    : $STATE_DIR/probe.db"
