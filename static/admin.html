@@ -161,7 +161,7 @@
     <div class="f"><label>自定义标签（显示在卡片别名下方，最多 6 个）</label>
       <div id="ed_tags"></div>
       <div class="tagrow">
-        <input id="ed_tagtext" placeholder="例如 $49.99/mo" maxlength="24" onkeydown="if(event.key==='Enter')addTag()">
+        <input id="ed_tagtext" placeholder="例如 免费 / $49.99/mo，回车添加" maxlength="24" onkeydown="if(event.key==='Enter'){event.preventDefault();addTag()}">
         <button onclick="addTag()">添加</button>
       </div>
       <div class="sw" id="ed_swatches"></div>
@@ -407,12 +407,15 @@ function addTag() {
   TAGS.push({t: v, c: PICK});
   $("ed_tagtext").value = "";
   renderTags();
+  $("ed_tagtext").focus();
 }
 function rmTag(i) { TAGS.splice(i, 1); renderTags(); }
 
 async function saveNode() {
   const alias = $("ed_alias").value.trim();
   if (!alias) { alert("别名必填"); return; }
+  // 输入框里还有没点「添加」的文字，直接算进去，免得白填
+  if ($("ed_tagtext").value.trim()) addTag();
   const quotaGb = Number($("ed_quota").value || 0);
   const body = {
     alias,
