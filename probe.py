@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.15"
+VERSION = "0.5.16"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
