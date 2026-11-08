@@ -111,7 +111,6 @@ if not cfg["admin_token"]:
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, ensure_ascii=False, indent=2)
 os.chmod(path, 0o600)
-print(cfg["admin_token"] if cfg["admin_token"] else "")
 PY
 ADMIN_TOKEN="$(python3 -c "import json;print(json.load(open('$ETC_DIR/config.json'))['admin_token'])")"
 ok "配置 → $ETC_DIR/config.json（权限 600）"
