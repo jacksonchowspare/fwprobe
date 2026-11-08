@@ -146,6 +146,9 @@
   .chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
   .chart .t{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between}
   .chart canvas{width:100%;height:130px;display:block}
+  .chart .t .mini{margin-left:6px;padding:1px 7px;border-radius:999px;font-size:10.5px;line-height:1.5;
+    border:1px solid var(--border);background:var(--hover);color:var(--muted);cursor:pointer;vertical-align:1px}
+  .chart .t .mini.on{color:var(--text);border-color:rgba(77,163,255,.55);background:rgba(77,163,255,.16)}
   #ranges button.active{color:var(--text);border-color:rgba(77,163,255,.55);background:rgba(77,163,255,.16)}
   /* 系统信息：中间分开，左右各一半；按列填充（左边 6 项，右边 6 项） */
   /* 三网图例：点亮的显示、灰掉的不显示（默认全亮） */
@@ -212,7 +215,7 @@
       <div class="chart"><div class="t"><span>CPU 使用率</span><span id="c_cpu"></span></div><canvas id="ch_cpu"></canvas></div>
       <div class="chart"><div class="t"><span>内存占用</span><span id="c_mem"></span></div><canvas id="ch_mem"></canvas></div>
       <div class="chart"><div class="t"><span>网络（上行 / 下行）</span><span id="c_net"></span></div><canvas id="ch_net"></canvas></div>
-      <div class="chart"><div class="t"><span>三网时延</span><span id="c_lat"></span></div>
+      <div class="chart"><div class="t"><span>三网时延 <button class="mini" id="smooth_btn" onclick="toggleSmooth()">曲线</button></span><span id="c_lat"></span></div>
         <div class="legend" id="lat_legend"></div>
         <canvas id="ch_lat"></canvas></div>
     </div>
@@ -668,8 +671,7 @@ function drawChart(canvasId, groups, opts) {
 
   const live = (groups || []).filter(g => (g.points || []).some(p => p.v != null));
   const multi = opts.legend === false ? false : (live.length > 1 || opts.legend);
-  const L = 44, R = 10, T = multi ? 20 : 10, B = 18;
-  const pw = Math.max(10, w - L - R), ph = Math.max(10, h - T - B);
+  const R = 10, T = multi ? 20 : 10, B = 18;
 
   const t0 = Math.min(...data.map(p => p.ts));
   const t1 = Math.max(...data.map(p => p.ts));
@@ -680,18 +682,27 @@ function drawChart(canvasId, groups, opts) {
   const target = Math.max(ref, opts.floor || 0);
   let ymax = chooseYmax(target, opts.max);
   if (ymax <= 0) ymax = 1;
+
+  // 左边距按最宽的那个刻度文字算：否则 "78.1 KB/s" 会被切掉首位数字（看着像 8.1）
+  ctx.font = "10px -apple-system,'Segoe UI',sans-serif";
+  const tickLabels = [];
+  for (let i = 0; i <= yticks; i++) {
+    const v = ymax * i / yticks;
+    tickLabels.push(opts.yfmt ? opts.yfmt(v) : String(Math.round(v)));
+  }
+  const L = Math.max(34, Math.ceil(Math.max(...tickLabels.map(t => ctx.measureText(t).width))) + 12);
+  const pw = Math.max(10, w - L - R), ph = Math.max(10, h - T - B);
   const X = ts => L + (t1 > t0 ? (ts - t0) / (t1 - t0) : 0.5) * pw;
   const Y = v => T + ph - Math.max(0, Math.min(1, v / ymax)) * ph;
 
   // 网格 + Y 轴刻度
-  ctx.font = "10px -apple-system,'Segoe UI',sans-serif";
   ctx.textBaseline = "middle";
   for (let i = 0; i <= yticks; i++) {
     const v = ymax * i / yticks, y = Math.round(Y(v)) + 0.5;
     ctx.strokeStyle = border; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
     ctx.fillStyle = muted; ctx.textAlign = "right";
-    ctx.fillText(opts.yfmt ? opts.yfmt(v) : String(Math.round(v)), L - 6, y);
+    ctx.fillText(tickLabels[i], L - 6, y);
   }
   // X 轴时间刻度
   const xticks = 4;
@@ -705,12 +716,26 @@ function drawChart(canvasId, groups, opts) {
     ctx.fillText(axisTime(ts, spanH), x, h - 5);
   }
 
-  // 折线（单组时带面积填充）
+  // 折线 / 平滑曲线（单组时带面积填充）
   live.forEach(g => {
     const pts = (g.points || []).filter(p => p.v != null && isFinite(p.v));
     if (!pts.length) return;
     ctx.beginPath();
-    pts.forEach((p, i) => { const x = X(p.ts), y = Y(p.v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    if (opts.smooth && pts.length > 2) {
+      // Catmull-Rom 转贝塞尔：曲线穿过每个真实采样点，不做拟合平均
+      const cx = i => X(pts[i].ts), cy = i => Y(pts[i].v);
+      ctx.moveTo(cx(0), cy(0));
+      for (let i = 0; i < pts.length - 1; i++) {
+        const i0 = Math.max(0, i - 1), i3 = Math.min(pts.length - 1, i + 2);
+        const c1x = cx(i) + (cx(i + 1) - cx(i0)) / 6, c1y = cy(i) + (cy(i + 1) - cy(i0)) / 6;
+        const c2x = cx(i + 1) - (cx(i3) - cx(i)) / 6, c2y = cy(i + 1) - (cy(i3) - cy(i)) / 6;
+        ctx.bezierCurveTo(c1x, Math.max(T, Math.min(T + ph, c1y)),
+                          c2x, Math.max(T, Math.min(T + ph, c2y)),
+                          cx(i + 1), cy(i + 1));
+      }
+    } else {
+      pts.forEach((p, i) => { const x = X(p.ts), y = Y(p.v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    }
     ctx.strokeStyle = g.color || "#4da3ff";
     ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.stroke();
     if (live.length === 1 && opts.fill) {
@@ -740,6 +765,7 @@ function drawChart(canvasId, groups, opts) {
 
 /* ───── 三网曲线：点亮=显示，灰色=隐藏；默认全亮 ─────
    第一次点击等于「只看这一条」，之后每次点击是切换；全亮回默认，永远不会全灭。 */
+let LAT_SMOOTH = localStorage.getItem("fwp_smooth") === "1";   // 「曲线」开关：折线 ↔ 平滑
 let LAT_SERIES = [];              // [{name, color, points}]
 let LAT_HIDDEN = new Set();       // 空集合 = 全部显示
 
@@ -749,6 +775,20 @@ function carrierColor(name) {
   if (/联通|unicom|cucc/i.test(name)) return "#4da3ff";        // 蓝
   const pal = ["#a78bfa", "#f472b6", "#22d3ee", "#fb923c"];
   return pal[Math.abs(name.length) % pal.length];
+}
+
+function toggleSmooth() {
+  LAT_SMOOTH = !LAT_SMOOTH;
+  try { localStorage.setItem("fwp_smooth", LAT_SMOOTH ? "1" : "0"); } catch (e) {}
+  syncSmoothBtn();
+  renderLat();
+}
+function syncSmoothBtn() {
+  const b = $("smooth_btn");
+  if (!b) return;
+  b.classList.toggle("on", LAT_SMOOTH);
+  b.textContent = "平滑";     // 文案固定，亮=平滑、暗=折线
+  b.title = LAT_SMOOTH ? "平滑曲线：开（点击改回折线）" : "折线：点击改平滑曲线";
 }
 
 function toggleLat(name) {
@@ -774,7 +814,7 @@ function renderLat() {
   }
   const shown = LAT_SERIES.filter(x => !LAT_HIDDEN.has(x.name));
   drawChart("ch_lat", shown, { yfmt: v => Math.round(v) + "ms", p95: true, floor: 50,
-                               max: 1000, hours: rangeHours(), legend: false });
+                               smooth: LAT_SMOOTH, hours: rangeHours(), legend: false });
 }
 
 function monthDays() {
@@ -855,6 +895,7 @@ function route() {
     $("nodes").style.display = "none";
     $("filters").style.display = "none";
     $("detail").classList.add("show");
+    syncSmoothBtn();
     document.querySelectorAll("#ranges button").forEach(b =>
       b.classList.toggle("active", String(b.dataset.r) === String(RANGE)));
     loadDetail();
