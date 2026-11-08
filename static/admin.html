@@ -324,6 +324,7 @@ function renderRows() {
       <td data-k="状态"><span class="dot ${n.online ? "" : "off"}"></span>
         <span class="small">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span></td>
       <td data-k="Agent" class="small ${needUp ? "" : "muted"}">${esc(n.agent_ver || "—")}
+        ${n.pending_uninstall ? `<div class="tag" style="color:var(--bad);border-color:#f8717155;background:#f871711f;margin-top:2px">待卸载（等上报）</div>` : ""}
         ${n.target_ver ? `<div class="tag" style="color:var(--warn);border-color:#fbbf2455;background:#fbbf241f;margin-top:2px">升级中 → ${esc(n.target_ver)}</div>`
           : needUp ? `<div class="muted" style="font-size:11.5px">可升到 ${esc(META.agent_version)}</div>` : ""}</td>
       <td data-k="到期/配额" class="small">${esc(exp)}<div class="muted">${quota}</div></td>
@@ -332,6 +333,7 @@ function renderRows() {
         ${needUp && n.can_self_upgrade ? `<button class="primary" onclick="upgrade('${n.id}')">升级</button>` : ""}
         ${needUp && !n.can_self_upgrade ? `<button disabled title="这台的 agent 太旧（0.5.4 之前），不认升级指令，需要手动装一次">需手动升级</button>` : ""}
         <button onclick="rotate('${n.id}')">重发令牌</button>
+        <button class="danger" onclick="uninstallProbe('${n.id}')">卸载探针</button>
         <button class="danger" onclick="delNode('${n.id}')">删除</button>
       </div></td>
     </tr>`;
@@ -479,6 +481,17 @@ async function rotate(id) {
   if (!r.ok) { alert(d.error || "操作失败"); return; }
   showCmd(d.token, n && n.alias, true);
   load();
+}
+async function uninstallProbe(id) {
+  const n = NODES.find(x => x.id === id) || {};
+  if (!confirm(`在「${n.alias || id}」上卸载探针？\n\n会在那台机器上停服务、删文件（不动面板和别的业务），
+然后从中心移除这个节点和历史数据。\n\n离线节点会在下次上线时执行。`)) return;
+  const r = await API(`/api/nodes/${id}/uninstall`, {method: "POST"});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "下发失败"); return; }
+  await load();
+  alert(d.online ? "已下发：那台机器 30 秒内会自己卸载，然后从列表消失。"
+                 : "该节点当前离线，已排队，等它下次上报时执行。");
 }
 async function delNode(id) {
   const n = NODES.find(x => x.id === id);

@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.7"
+VERSION = "0.5.10"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     expires_at  TEXT DEFAULT '',        -- YYYY-MM-DD，空 = 未填
     agent_ver   TEXT DEFAULT '',
     target_ver  TEXT DEFAULT '',      -- 升级目标版本，agent 升到后清空
+    pending_uninstall INTEGER DEFAULT 0,  -- 中心点了「卸载探针」，等 agent 下次上报执行
     note        TEXT DEFAULT '',
     enabled     INTEGER DEFAULT 1,
     created     INTEGER DEFAULT 0,
@@ -425,6 +426,9 @@ class Store:
         if "target_ver" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN target_ver TEXT DEFAULT ''")
             self.conn.commit()
+        if "pending_uninstall" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN pending_uninstall INTEGER DEFAULT 0")
+            self.conn.commit()
 
     def nodes(self):
         with self.lock:
@@ -449,7 +453,7 @@ class Store:
         if "tags" in fields:
             fields["tags"] = dump_tags(fields.pop("tags"))
         allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled",
-                   "country", "tags", "target_ver"}
+                   "country", "tags", "target_ver", "pending_uninstall"}
         kv = {k: v for k, v in fields.items() if k in allowed}
         if not kv:
             return False
@@ -1096,7 +1100,14 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 return self._send(400, {"error": "请求体不是合法 JSON"})
             ts = self.store.ingest(node, payload, self._peer_ip())
+            if payload.get("agent_uninstall_ack"):
+                alias = node.get("alias") or node["id"]
+                self.store.delete_node(node["id"])
+                self.store.audit("node_uninstalled", alias, "agent 已自卸载并确认", self._peer_ip())
+                return self._send(200, {"ok": True, "bye": True})
             resp = {"ok": True, "ts": ts}
+            if int(node.get("pending_uninstall") or 0):
+                resp["uninstall"] = True
             agent_ver = str(payload.get("agent") or "").strip()
             tgt = str(node.get("target_ver") or "").strip()
             meta_ver, meta_sha = agent_file_meta()
@@ -1169,6 +1180,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.store.audit("agent_upgrade", node.get("alias") or nid,
                                  f"→ {meta_ver}", self._peer_ip())
                 return self._send(200, {"ok": True, "target": meta_ver})
+            if rest.endswith("/uninstall"):          # 让 agent 自卸载，确认后节点从中心移除
+                nid = rest[:-len("/uninstall")].strip("/")
+                node = self.store.node(nid)
+                if not node:
+                    return self._send(404, {"error": "节点不存在"})
+                self.store.update_node(nid, pending_uninstall=1)
+                self.store.audit("agent_uninstall", node.get("alias") or nid,
+                                 "已下发卸载指令", self._peer_ip())
+                return self._send(200, {"ok": True,
+                                        "online": bool(node.get("last_seen") and
+                                                       int(time.time()) - int(node["last_seen"]) < OFFLINE_AFTER)})
             if rest.endswith("/token"):               # 生成新 token，旧 token 立即失效
                 nid = rest[:-len("/token")].strip("/")
                 node = self.store.node(nid)

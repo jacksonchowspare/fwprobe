@@ -134,7 +134,10 @@ User=root
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now "$SERVICE" >/dev/null 2>&1 || true
+# ⚠ enable --now 对已在运行的服务是空操作：重装/换 token 后进程仍拿旧配置（实测 403 一直刷）
+#   所以先 enable，再无条件 restart，保证新配置/新 agent.py 真正生效
+systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+systemctl restart "$SERVICE" >/dev/null 2>&1 || true
 
 step "5. 首次上报自检"
 sleep 3

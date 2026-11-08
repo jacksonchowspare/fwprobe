@@ -40,7 +40,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.7"
+VERSION = "0.5.10"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
@@ -630,13 +630,60 @@ def perform_upgrade(cfg, spec):
     return True
 
 
+def perform_uninstall(cfg):
+    """中心要卸载本探针：先回一条确认（中心据此移除节点），再由后台脚本停服务、删文件。"""
+    try:
+        post_report(cfg, {"agent": VERSION, "ts": int(time.time()), "agent_uninstall_ack": True})
+    except Exception as exc:
+        print(f"[uninstall] 回执失败（继续卸载）：{exc}", file=sys.stderr, flush=True)
+    script = (
+        "sleep 2; "
+        "/bin/systemctl stop fwprobe-agent 2>/dev/null; "
+        "/bin/systemctl disable fwprobe-agent 2>/dev/null; "
+        "rm -f /etc/systemd/system/fwprobe-agent.service; "
+        "/bin/systemctl daemon-reload 2>/dev/null; "
+        "rm -rf /usr/local/lib/fwprobe-agent /etc/fwprobe-agent /var/lib/fwprobe-agent"
+    )
+    print("[uninstall] 已按中心指令卸载本机探针", flush=True)
+    # ⚠ 卸载脚本不能直接 spawn：agent 自己是 systemd 管的服务（Restart=always），
+    #   进程一退出 systemd 就把本单元 cgroup 里的子进程一起清掉，普通 Popen/setsid 都活不下来
+    #   （实测两次：脚本被杀、文件全留着，服务还被拉起来 403 刷屏）。
+    # 正确做法：用 systemd-run 建一个 5 秒后触发的**独立临时 timer 单元**，
+    #   等 systemd-run 同步返回（单元已注册）后再退出，卸载在那个单元里跑。
+    ok = False
+    if shutil.which("systemd-run"):
+        try:
+            r = subprocess.run(
+                ["systemd-run", "--on-active=5", "--unit", f"ipro-uninstall-{int(time.time())}",
+                 "--collect", "--quiet", "/bin/sh", "-c", script],
+                capture_output=True, text=True, timeout=20)
+            ok = r.returncode == 0
+            if not ok:
+                print(f"[uninstall] systemd-run 失败：{(r.stderr or '').strip()[:200]}",
+                      file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"[uninstall] systemd-run 异常：{exc}", file=sys.stderr, flush=True)
+    if not ok:
+        try:
+            subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            print(f"[uninstall] 启动卸载脚本失败：{exc}", file=sys.stderr, flush=True)
+    return True
+
+
 def handle_report_response(cfg, body):
-    """上报应答里可能带升级指令"""
+    """上报应答里可能带升级 / 卸载指令"""
     try:
         data = json.loads(body or "{}")
     except ValueError:
         return
-    if isinstance(data, dict) and isinstance(data.get("upgrade"), dict):
+    if not isinstance(data, dict):
+        return
+    if data.get("uninstall"):
+        perform_uninstall(cfg)
+        sys.exit(0)
+    if isinstance(data.get("upgrade"), dict):
         perform_upgrade(cfg, data["upgrade"])
 
 

@@ -561,6 +561,25 @@ class TestHTTP(unittest.TestCase):
         self.assertTrue(self.st.del_ptoken(pid))
         self.assertIsNone(self.st.find_ptoken(tok))
 
+    def test_uninstall_flow(self):
+        """卸载：下发标记 → 上报应答带 uninstall → agent 回执后节点被移除"""
+        code, body = self._post("/api/nodes", {"alias": "待卸载机"}, token="admin-test")
+        nid, tok = json.loads(body)["id"], json.loads(body)["token"]
+        self._post("/api/report", {"agent": "0.5.8", "ts": int(time.time())}, token=tok, csrf=False)
+        code, body = self._post(f"/api/nodes/{nid}/uninstall", {}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        self.assertEqual((self.st.node(nid) or {}).get("pending_uninstall"), 1)
+        # 普通上报不会带指令（除非有待卸载）
+        code, body = self._post("/api/report", {"agent": "0.5.8", "ts": int(time.time())}, token=tok, csrf=False)
+        self.assertTrue(json.loads(body).get("uninstall"))
+        # agent 回执 → 节点删除，token 失效
+        code, body = self._post("/api/report", {"agent": "0.5.8", "agent_uninstall_ack": True,
+                                                "ts": int(time.time())}, token=tok, csrf=False)
+        self.assertEqual(code, 200, body)
+        self.assertIsNone(self.st.node(nid))
+        code, _ = self._post("/api/report", {"agent": "0.5.8", "ts": int(time.time())}, token=tok, csrf=False)
+        self.assertEqual(code, 403)
+
     def test_token_rotate(self):
         """重发令牌：旧 token 立刻失效，新 token 能上报"""
         code, body = self._post("/api/nodes", {"alias": "轮换机"}, token="admin-test")
@@ -792,8 +811,34 @@ class TestMisc(unittest.TestCase):
         P.urllib.request.urlopen = fake_urlopen
         try:
             self.assertEqual(P.lookup_country("10.0.0.5"), "SG")
-            self.assertTrue(any("fields=countryCode" in u and "/json/?" in u for u in seen))
+            # v0.5.7 起优先 ipinfo.io（对机房 IP 更准），ip-api 只作兜底
+            self.assertTrue(any("ipinfo.io/json" in u for u in seen))
             self.assertEqual(P.lookup_country("192.168.1.1"), "SG")
+        finally:
+            P.urllib.request.urlopen = orig
+
+    def test_lookup_country_fallback_to_ipapi(self):
+        """ipinfo 挂掉时回落到 ip-api，别因为一个源不通就丢归属地"""
+        seen = []
+
+        class _Resp:
+            def read(self, n=None): return b'{"countryCode":"JP"}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(url, timeout=0):
+            u = url if isinstance(url, str) else getattr(url, "full_url", "")
+            seen.append(u)
+            if "ipinfo.io" in u:
+                raise OSError("blocked")
+            return _Resp()
+
+        orig = P.urllib.request.urlopen
+        P.urllib.request.urlopen = fake_urlopen
+        try:
+            self.assertEqual(P.lookup_country("8.8.4.4"), "JP")
+            self.assertTrue(any("ipinfo.io" in u for u in seen))
+            self.assertTrue(any("ip-api.com" in u for u in seen))
         finally:
             P.urllib.request.urlopen = orig
 
