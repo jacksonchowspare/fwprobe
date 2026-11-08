@@ -40,7 +40,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.5"
+VERSION = "0.5.6"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200

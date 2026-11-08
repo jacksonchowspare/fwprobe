@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.5"
+VERSION = "0.5.6"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -901,7 +901,19 @@ class Handler(BaseHTTPRequestHandler):
         return (self.headers.get("X-IPROBE") or "").strip() == "1"
 
     def _peer_ip(self):
-        return self.client_address[0]
+        """真实来源 IP：经 nginx 反代时 peer 是 127.0.0.1，必须用 X-Real-IP / X-Forwarded-For，
+        否则所有节点都被当成「中心自己」——归属地/旗标会全部错成中心所在国家。
+        只在本机回环/内网来源时才信任这些头（端口只监听 127.0.0.1，外部伪造不到）。"""
+        ip = self.client_address[0]
+        if is_private_ip(ip):
+            for h in ("X-Real-IP", "X-Forwarded-For"):
+                v = (self.headers.get(h) or "").strip()
+                if not v:
+                    continue
+                cand = v.split(",")[0].strip()
+                if cand and not is_private_ip(cand):
+                    return cand
+        return ip
 
     # -- 路由 ---------------------------------------------------------------
     def do_GET(self):
