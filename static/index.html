@@ -100,8 +100,11 @@
   .trow{display:flex;flex-direction:column;gap:3px;min-width:0}
   .trow + .trow{margin-top:6px}
   .trow-h{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:11px;line-height:1.25}
-  .trow-h .name{display:flex;align-items:center;gap:4px;color:var(--muted);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .trow-h .dot{width:6px;height:6px;border-radius:50%;flex:none}
+  .trow-h .name{display:flex;align-items:center;gap:6px;color:var(--muted);min-width:0}
+  .trow-h .name .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 线路圆点：自己的静态柔光（含 2px 光环），不带 pulse 扩散环——
+     pulse 会扩到 6px，被行内 overflow:hidden 和面板内边距切掉，看着像缺一块 */
+  .cd{width:6px;height:6px;border-radius:50%;flex:none}
   .trow-h .v{font-variant-numeric:tabular-nums;font-weight:600;color:var(--text);white-space:nowrap}
   .trow-h .v.ok{color:var(--ok)} .trow-h .v.warn{color:var(--warn)} .trow-h .v.bad{color:var(--bad)}
   @media (max-width:860px){ .tpanels{grid-template-columns:1fr;gap:8px} }
@@ -448,9 +451,12 @@ function card(n) {
              loss: t.avg_loss == null ? null : t.avg_loss,
              b: t.buckets || [] };
   });
-  const rowHead = (c, val) => `<div class="trow-h">
-      <span class="name"><i class="dot" style="background:${carrierColor(c.name)}"></i>${esc(c.name)}</span>
+  const rowHead = (c, val) => {
+    const col = carrierColor(c.name);
+    return `<div class="trow-h">
+      <span class="name"><i class="cd" style="background:${col};box-shadow:0 0 0 2px ${col}2e"></i><span class="nm">${esc(c.name)}</span></span>
       <b class="v ${val.cls}">${val.text}</b></div>`;
+  };
   const lat = carriers.map(c => `<div class="trow">
       ${rowHead(c, { cls: LAT_CLASS(c.ms), text: c.ms == null ? "-" : Math.round(c.ms) + " ms" })}
       ${strip(c.b, "lat")}</div>`).join("");
