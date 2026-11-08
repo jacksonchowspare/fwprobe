@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.11"
+VERSION = "0.5.12"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     agent_ver   TEXT DEFAULT '',
     target_ver  TEXT DEFAULT '',      -- 升级目标版本，agent 升到后清空
     pending_uninstall INTEGER DEFAULT 0,  -- 中心点了「卸载探针」，等 agent 下次上报执行
+    src         TEXT DEFAULT '',      -- 外部面板的节点 id（面板卸载时用它精确匹配）
     note        TEXT DEFAULT '',
     enabled     INTEGER DEFAULT 1,
     created     INTEGER DEFAULT 0,
@@ -429,6 +430,9 @@ class Store:
         if "pending_uninstall" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN pending_uninstall INTEGER DEFAULT 0")
             self.conn.commit()
+        if "src" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN src TEXT DEFAULT ''")
+            self.conn.commit()
 
     def nodes(self):
         with self.lock:
@@ -453,7 +457,7 @@ class Store:
         if "tags" in fields:
             fields["tags"] = dump_tags(fields.pop("tags"))
         allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled",
-                   "country", "tags", "target_ver", "pending_uninstall"}
+                   "country", "tags", "target_ver", "pending_uninstall", "src"}
         kv = {k: v for k, v in fields.items() if k in allowed}
         if not kv:
             return False
@@ -1130,14 +1134,24 @@ class Handler(BaseHTTPRequestHandler):
             data = self._json_body() or {}
             alias = (data.get("alias") or "").strip()
             nid = (data.get("id") or "").strip()
+            src = (data.get("source") or "").strip()
+            mine = [n for n in self.store.nodes() if (n.get("note") or "").startswith("由供应令牌")]
             target = None
-            for n in self.store.nodes():
-                if nid and n["id"] == nid:
-                    target = n
-                    break
-                if alias and n.get("alias") == alias and (n.get("note") or "").startswith("由供应令牌"):
-                    target = n
-                    break
+            if nid:
+                target = next((n for n in mine if n["id"] == nid), None)
+            if not target and src:
+                target = next((n for n in mine if n.get("src") == src), None)
+            if not target and alias:
+                target = next((n for n in mine if n.get("alias") == alias), None)
+            if not target and alias:
+                # 兜底：面板节点名与中心别名常不一致（SG1-Oracle 对 新加坡SG1-Oracle），
+                # 归一化后互相包含且唯一命中才删，避免误删
+                def norm(x):
+                    return "".join(ch for ch in (x or "").lower() if ch.isalnum())
+                a = norm(alias)
+                hits = [n for n in mine if a and (a in norm(n.get("alias")) or norm(n.get("alias")) in a)]
+                if len(hits) == 1:
+                    target = hits[0]
             if not target:
                 return self._send(404, {"error": "找不到该节点"})
             self.store.delete_node(target["id"])
@@ -1161,6 +1175,9 @@ class Handler(BaseHTTPRequestHandler):
                                            data.get("expires_at", ""),
                                            f"由供应令牌「{ptok.get('label') or ptok.get('id')}」创建",
                                            groups=groups, tags=tags)
+            src = (data.get("source") or "").strip()[:64]
+            if src:
+                self.store.update_node(nid, src=src)
             base = (self.server.config.get("base_url") or "").rstrip("/")
             self.store.audit("provision", alias, f"id={nid} via {ptok.get('label') or ptok.get('id')}",
                              self._peer_ip())

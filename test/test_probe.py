@@ -585,6 +585,34 @@ class TestHTTP(unittest.TestCase):
         self.assertEqual(code, 404)
         self.assertIsNotNone(self.st.node(manual_id))
 
+    def test_provision_remove_by_source(self):
+        """面板节点名和中心别名不一致时，靠 source（面板节点 id）也能删掉"""
+        _, tok = self.st.add_ptoken("fwpanel2")
+        code, body = self._post("/api/provision/node",
+                                {"alias": "新加坡SG1-Oracle", "source": "n1"}, token=tok, csrf=False)
+        self.assertEqual(code, 200, body)
+        nid = json.loads(body)["id"]
+        self.assertEqual((self.st.node(nid) or {}).get("src"), "n1")
+        # 按 source 删（别名完全对不上也没关系）
+        code, body = self._post("/api/provision/remove",
+                                {"alias": "SG1-Oracle", "source": "n1"}, token=tok, csrf=False)
+        self.assertEqual(code, 200, body)
+        self.assertIsNone(self.st.node(nid))
+
+    def test_provision_remove_fuzzy_unique(self):
+        """老节点没 src：归一化后唯一包含才删，多个候选就拒绝"""
+        _, tok = self.st.add_ptoken("fwpanel2")
+        code, body = self._post("/api/provision/node", {"alias": "新加坡SG2-Oracle"}, token=tok, csrf=False)
+        a_id = json.loads(body)["id"]
+        code, body = self._post("/api/provision/remove", {"alias": "SG2-Oracle"}, token=tok, csrf=False)
+        self.assertEqual(code, 200, body)
+        self.assertIsNone(self.st.node(a_id))
+        # 两个候选 → 不删
+        for alias in ("东京AK-JPHyer-1", "东京AK-JPHyer-2"):
+            self._post("/api/provision/node", {"alias": alias}, token=tok, csrf=False)
+        code, body = self._post("/api/provision/remove", {"alias": "AK"}, token=tok, csrf=False)
+        self.assertEqual(code, 404, body)
+
     def test_uninstall_flow(self):
         """卸载：下发标记 → 上报应答带 uninstall → agent 回执后节点被移除"""
         code, body = self._post("/api/nodes", {"alias": "待卸载机"}, token="admin-test")
