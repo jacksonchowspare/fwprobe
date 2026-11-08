@@ -37,7 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
@@ -220,35 +220,44 @@ def hostname():
 
 
 # --------------------------------------------------------------------------- 探测
-def resolve(host, family="auto"):
+def resolve_all(host, family="auto"):
+    """解析出该目标的**全部**地址，返回 (地址列表, 族标签)。
+
+    为什么不全用第一个：三网目标是 CDN 域名，一次解析会拿到多个 A 记录，
+    不同时刻命中不同边缘节点，延迟能差 10 倍以上（实测 30ms ↔ 1000ms）。
+    逐个测一遍取最优，才反映「这条线路的真实质量」，也不会一次抽到慢节点就报红。
+    """
     fam = {"4": socket.AF_INET, "6": socket.AF_INET6}.get(str(family))
-    if fam is None:
+    tag = str(family) if fam is not None else "auto"
+    order = [fam] if fam is not None else [socket.AF_INET6, socket.AF_INET]
+    for f in order:
         try:
-            infos = socket.getaddrinfo(host, None, socket.AF_INET6, socket.SOCK_STREAM)
-            if infos:
-                return infos[0][4][0], "6"
+            infos = socket.getaddrinfo(host, None, f, socket.SOCK_STREAM)
         except socket.gaierror:
-            pass
-        fam = socket.AF_INET
-        tag = "4"
-    else:
-        tag = str(family)
-    try:
-        infos = socket.getaddrinfo(host, None, fam, socket.SOCK_STREAM)
-        if not infos:
-            return None, tag
-        return infos[0][4][0], tag
-    except socket.gaierror:
-        return None, tag
+            continue
+        addrs = []
+        for info in infos:
+            ip = info[4][0]
+            if ip not in addrs:
+                addrs.append(ip)
+        if addrs:
+            return addrs, ("6" if f == socket.AF_INET6 else "4")
+    return [], tag
 
 
-def tcping(host, port, attempts=3, timeout=4.0, family="auto"):
-    addr, fam = resolve(host, family)
-    if not addr:
+def resolve(host, family="auto"):
+    addrs, tag = resolve_all(host, family)
+    return (addrs[0] if addrs else None), tag
+
+
+def tcping(host, port, attempts=4, timeout=4.0, family="auto"):
+    addrs, fam = resolve_all(host, family)
+    if not addrs:
         return {"ok": False, "loss": 100.0, "min": None, "avg": None, "max": None,
                 "family": fam, "error": "DNS 解析失败"}
     rtts, fails = [], 0
-    for _ in range(attempts):
+    for i in range(attempts):
+        addr = addrs[i % len(addrs)]          # 多地址轮流测
         t0 = time.time()
         try:
             s = socket.create_connection((addr, int(port or 80)), timeout=timeout)
@@ -260,7 +269,8 @@ def tcping(host, port, attempts=3, timeout=4.0, family="auto"):
     if not rtts:
         return {"ok": False, "loss": 100.0, "min": None, "avg": None, "max": None, "family": fam}
     return {"ok": True, "loss": loss, "min": round(min(rtts), 1),
-            "avg": round(sum(rtts) / len(rtts), 1), "max": round(max(rtts), 1), "family": fam}
+            "avg": round(sum(rtts) / len(rtts), 1), "max": round(max(rtts), 1),
+            "family": fam, "addrs": len(addrs)}
 
 
 def _icmp_checksum(data):
