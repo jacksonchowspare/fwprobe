@@ -146,6 +146,15 @@
   .chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
   .chart .t{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between}
   .chart canvas{width:100%;height:130px;display:block}
+  .chart{position:relative}
+  .tip{position:absolute;z-index:8;pointer-events:none;padding:6px 9px;border-radius:9px;
+    background:var(--solid);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.32);
+    font-size:11.5px;line-height:1.6;white-space:nowrap;opacity:0;transition:opacity .1s}
+  .tip.show{opacity:1}
+  .tip .h{color:var(--muted);font-variant-numeric:tabular-nums;margin-bottom:2px}
+  .tip .row{display:flex;align-items:center;gap:6px}
+  .tip .row .d{width:6px;height:6px;border-radius:50%;flex:none}
+  .tip .row b{margin-left:auto;padding-left:12px;font-weight:600;font-variant-numeric:tabular-nums}
   .chart .t .mini{margin-left:6px;padding:1px 7px;border-radius:999px;font-size:10.5px;line-height:1.5;
     border:1px solid var(--border);background:var(--hover);color:var(--muted);cursor:pointer;vertical-align:1px}
   .chart .t .mini.on{color:var(--text);border-color:rgba(77,163,255,.55);background:rgba(77,163,255,.16)}
@@ -746,6 +755,29 @@ function drawChart(canvasId, groups, opts) {
     }
   });
 
+  // 悬浮十字线 + 采样点（值由外层 tooltip 显示）
+  live.forEach(g => { delete g.hover; });
+  if (opts.hoverTs != null) {
+    const hx = X(opts.hoverTs);
+    ctx.save();
+    ctx.setLineDash([3, 3]); ctx.strokeStyle = muted; ctx.globalAlpha = 0.75;
+    ctx.beginPath(); ctx.moveTo(hx, T); ctx.lineTo(hx, T + ph); ctx.stroke();
+    ctx.restore();
+    live.forEach(g => {
+      const pts = (g.points || []).filter(p => p.v != null && isFinite(p.v));
+      if (!pts.length) return;
+      let best = pts[0];
+      for (const p of pts) if (Math.abs(p.ts - opts.hoverTs) < Math.abs(best.ts - opts.hoverTs)) best = p;
+      g.hover = best;
+      const px = X(best.ts), py = Y(best.v);
+      ctx.beginPath(); ctx.arc(px, py, 2.8, 0, Math.PI * 2);
+      ctx.fillStyle = g.color || "#4da3ff"; ctx.fill();
+      ctx.lineWidth = 1.2; ctx.strokeStyle = themeVar("--solid", "#141b23"); ctx.stroke();
+    });
+  }
+  // 命中测试需要的几何信息
+  c.__geo = { L, pw, T, ph, t0, t1, ymax };
+
   // 图例
   if (multi) {
     ctx.font = "10px -apple-system,'Segoe UI',sans-serif";
@@ -804,6 +836,76 @@ function toggleLat(name) {
   renderLat();
 }
 
+let LAT_HOVER = null;      // 当前吸附的时间点（秒）
+
+function latTipEl() {
+  let el = $("lat_tip");
+  if (!el) {
+    const cv = $("ch_lat");
+    if (!cv) return null;
+    el = document.createElement("div");
+    el.id = "lat_tip"; el.className = "tip";
+    cv.parentNode.appendChild(el);
+  }
+  return el;
+}
+
+function latHoverMove(ev) {
+  const c = $("ch_lat"), g = c && c.__geo;
+  if (!c || !g || !LAT_SERIES.length) return;
+  const r = c.getBoundingClientRect();
+  const x = ev.clientX - r.left;
+  const inside = x >= g.L - 4 && x <= g.L + g.pw + 4;
+  if (!inside) { latHoverEnd(); return; }
+  const ts = g.t0 + (Math.min(g.pw, Math.max(0, x - g.L)) / g.pw) * (g.t1 - g.t0);
+  LAT_HOVER = ts;
+  drawLatChart();               // 只重画，不重建图例
+  const tip = latTipEl();
+  if (!tip) return;
+  const shown = LAT_SERIES.filter(s => !LAT_HIDDEN.has(s.name));
+  const rows = shown.map(s => {
+    const h = s.hover, color = s.color;
+    const val = h ? (Math.round(h.v) + " ms") : "无数据";
+    return `<div class="row"><span class="d" style="background:${color}"></span>${esc(s.name)}<b>${val}</b></div>`;
+  }).join("");
+  const any = shown.map(s => s.hover).find(Boolean);
+  const head = any ? axisTime(any.ts, (g.t1 - g.t0) / 3600) : "";
+  tip.innerHTML = `<div class="h">${head}</div>${rows}`;
+  tip.classList.add("show");
+  // 定位：相对画布容器（.chart，position:relative）算，默认光标右上，贴边时翻到左侧
+  const host = c.parentNode.getBoundingClientRect();
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let left = ev.clientX - host.left + 14;
+  let top = ev.clientY - host.top - th - 10;
+  if (left + tw > host.width - 6) left = ev.clientX - host.left - tw - 14;
+  if (top < 2) top = ev.clientY - host.top + 16;
+  tip.style.left = Math.max(4, left) + "px";
+  tip.style.top = Math.max(4, top) + "px";
+}
+
+function latHoverEnd() {
+  if (LAT_HOVER == null) return;
+  LAT_HOVER = null;
+  const tip = $("lat_tip");
+  if (tip) tip.classList.remove("show");
+  drawLatChart();
+}
+
+function bindLatHover() {
+  const c = $("ch_lat");
+  if (!c || c.__bound) return;
+  c.__bound = true;
+  c.addEventListener("mousemove", latHoverMove);
+  c.addEventListener("mouseleave", latHoverEnd);
+}
+
+function drawLatChart() {
+  const shown = LAT_SERIES.filter(x => !LAT_HIDDEN.has(x.name));
+  drawChart("ch_lat", shown, { yfmt: v => Math.round(v) + "ms", p95: true, floor: 50,
+                               smooth: LAT_SMOOTH, hours: rangeHours(), legend: false,
+                               hoverTs: LAT_HOVER });
+}
+
 function renderLat() {
   const box = $("lat_legend");
   if (box) {
@@ -812,9 +914,8 @@ function renderLat() {
         title="${LAT_HIDDEN.has(x.name) ? "点击显示" : "点击只看这条"}">
         <span class="d" style="background:${x.color}"></span>${esc(x.name)}</button>`).join("");
   }
-  const shown = LAT_SERIES.filter(x => !LAT_HIDDEN.has(x.name));
-  drawChart("ch_lat", shown, { yfmt: v => Math.round(v) + "ms", p95: true, floor: 50,
-                               smooth: LAT_SMOOTH, hours: rangeHours(), legend: false });
+  drawLatChart();
+  bindLatHover();
 }
 
 function monthDays() {
