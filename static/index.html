@@ -102,11 +102,10 @@
   .lat .ms.ok{color:var(--ok)} .lat .ms.warn{color:var(--warn)} .lat .ms.bad{color:var(--bad)}
   .strip{display:block;width:100%;height:12px;overflow:visible}
   /* 最右一格「正在监测」：实心发光 + 明暗呼吸，不会看成缺口 */
-  .strip rect.live{animation:liveGlow 1.8s ease-in-out infinite}
-  @keyframes liveGlow{
-    0%,100%{filter:brightness(1);stroke-width:0}
-    50%{filter:brightness(1.45);stroke:#fff;stroke-width:.5}
-  }
+  /* 最右一格「正在监测」：只做透明度呼吸，不改描边/亮度——
+     之前加了 filter 和白色描边，会让这一格视觉上比别的格子大一圈 */
+  .strip rect.live{animation:livePulse 1.9s ease-in-out infinite}
+  @keyframes livePulse{0%,100%{opacity:1}50%{opacity:.45}}
   .lat .loss{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11.5px;width:32px;text-align:right}
   .foot{display:flex;align-items:center;gap:14px;margin-top:11px;border-top:1px dashed var(--border);
     padding-top:9px;font-size:12px;color:var(--muted)}
@@ -368,10 +367,13 @@ function strip(hist, kind, n) {
       }
     }
     rects += "<rect x=\"" + (i * seg + gap / 2).toFixed(3) + "\" y=\"0\" width=\"" + (seg - gap).toFixed(3)
-      + "\" height=\"10\" rx=\"0.8\" fill=\"" + color + "\"" + (last ? ' class="live"' : "")
+      + "\" height=\"10\" fill=\"" + color + "\"" + (last ? ' class="live"' : "")
       + "><title>" + tip + "</title></rect>";
   }
-  return "<svg class=\"strip\" viewBox=\"0 0 100 10\" preserveAspectRatio=\"none\">" + rects + "</svg>";
+  // shape-rendering=crispEdges：125%/150% 缩放下每格吸附到整数设备像素，
+  // 否则格子落在半像素上会被抗锯齿描边，亮度高的红/黄色看着比绿的高一格
+  return "<svg class=\"strip\" viewBox=\"0 0 100 10\" preserveAspectRatio=\"none\" shape-rendering=\"crispEdges\">"
+    + rects + "</svg>";
 }
 
 let NODES = [], OFFLINE_AFTER = 120, LAST_OK = 0;
