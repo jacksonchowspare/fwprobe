@@ -324,10 +324,12 @@ class TestHTTP(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
 
-    def _post(self, path, body, token=None):
+    def _post(self, path, body, token=None, csrf=True):
         data = json.dumps(body).encode()
         req = urllib.request.Request(self.base + path, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
+        if csrf:
+            req.add_header("X-IPROBE", "1")
         if token:
             req.add_header("Authorization", "Bearer " + token)
         try:
@@ -384,9 +386,112 @@ class TestHTTP(unittest.TestCase):
         self.assertIn("token", d)
         req = urllib.request.Request(self.base + "/api/nodes/" + d["id"], method="DELETE")
         req.add_header("Authorization", "Bearer admin-test")
+        req.add_header("X-IPROBE", "1")
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 200)
         self.assertIsNone(self.st.node(d["id"]))
+
+    def test_tags_parse_and_limits(self):
+        """标签：非法颜色回落预设、超长截断、最多 6 个、脏数据不炸"""
+        tags = P.sanitize_tags([{"t": " $49.99/mo ", "c": "#FFAA22"},
+                                {"t": "CN2 GIA", "c": "javascript:alert(1)"},
+                                {"t": "x" * 40, "c": "#123"}])
+        self.assertEqual(tags[0], {"t": "$49.99/mo", "c": "#ffaa22"})
+        self.assertEqual(tags[1]["c"], P.TAG_COLORS[0])
+        self.assertEqual(len(tags[2]["t"]), P.TAG_TEXT_MAX)
+        many = P.sanitize_tags([{"t": f"t{i}"} for i in range(20)])
+        self.assertEqual(len(many), P.TAG_MAX)
+        self.assertEqual(P.parse_tags("坏数据{"), [])
+        self.assertEqual(P.parse_tags(""), [])
+
+    def test_tags_roundtrip_api(self):
+        """新增/修改节点带标签，公开摘要里能拿到，且颜色被规范化"""
+        code, body = self._post("/api/nodes", {"alias": "标签机", "group": "SG",
+                                              "tags": [{"t": "$49.99/mo", "c": "#FBBF24"}]},
+                                token="admin-test")
+        self.assertEqual(code, 200, body)
+        nid = json.loads(body)["id"]
+        code, body = self._get("/api/public/summary")
+        node = [n for n in json.loads(body)["nodes"] if n["id"] == nid][0]
+        self.assertEqual(node["tags"], [{"t": "$49.99/mo", "c": "#fbbf24"}])
+        # 改成两个标签
+        code, body = self._post(f"/api/nodes/{nid}", {"tags": [{"t": "A", "c": "#34d399"},
+                                                              {"t": "B", "c": ""}]}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        node = [n for n in json.loads(self._get("/api/public/summary")[1])["nodes"] if n["id"] == nid][0]
+        self.assertEqual([t["t"] for t in node["tags"]], ["A", "B"])
+        self.assertEqual(node["tags"][1]["c"], P.TAG_COLORS[0])
+
+    def test_login_cookie_auth(self):
+        """token 换会话 Cookie 后，不带 Bearer 也能读管理接口"""
+        code, body = self._post("/api/admin/login", {"token": "wrong"}, csrf=False)
+        self.assertEqual(code, 401)
+        code, body = self._post("/api/admin/login", {"token": "admin-test"}, csrf=False)
+        self.assertEqual(code, 200, body)
+        cookie = None
+        # 用 requests 之外的标准库取 Set-Cookie 不方便，这里直接验签名函数
+        val, exp = P.make_session("admin-test")
+        self.assertGreater(P.read_session(f"iprobe_sess={val}", "admin-test"), 0)
+        self.assertEqual(P.read_session(f"iprobe_sess={val}", "other-token"), 0)
+        self.assertEqual(P.read_session("iprobe_sess=999.deadbeef", "admin-test"), 0)
+
+    def test_login_rate_limit(self):
+        P.clear_login_fail("10.9.9.9")
+        for _ in range(P.LOGIN_FAIL_MAX):
+            P.note_login_fail("10.9.9.9")
+        ok, wait = P.login_allowed("10.9.9.9")
+        self.assertFalse(ok)
+        self.assertGreaterEqual(wait, 0)
+        P.clear_login_fail("10.9.9.9")
+        self.assertTrue(P.login_allowed("10.9.9.9")[0])
+
+    def test_groups_rename(self):
+        code, body = self._post("/api/nodes", {"alias": "改组机", "groups": ["旧组", "保留"]},
+                                token="admin-test")
+        self.assertEqual(code, 200, body)
+        nid = json.loads(body)["id"]
+        code, body = self._post("/api/admin/groups/rename", {"from": "旧组", "to": "新组"}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        node = self.st.node(nid)
+        self.assertEqual(P.parse_groups(node["groups"]), ["新组", "保留"])
+
+    def test_write_requires_csrf_header(self):
+        """没有 X-IPROBE 头的写操作一律 403（配合 SameSite Cookie 防 CSRF）"""
+        code, body = self._post("/api/nodes", {"alias": "x"}, token="admin-test", csrf=False)
+        self.assertEqual(code, 403)
+
+    def test_audit_records_writes(self):
+        self._post("/api/nodes", {"alias": "审计机"}, token="admin-test")
+        code, body = self._get("/api/admin/audit", token="admin-test")
+        self.assertEqual(code, 200, body)
+        actions = [a["action"] for a in json.loads(body)["items"]]
+        self.assertIn("node_add", actions)
+
+    def test_token_rotate(self):
+        """重发令牌：旧 token 立刻失效，新 token 能上报"""
+        code, body = self._post("/api/nodes", {"alias": "轮换机"}, token="admin-test")
+        nid = json.loads(body)["id"]
+        old_tok = json.loads(body)["token"]
+        code, body = self._post(f"/api/nodes/{nid}/token", {}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        new_tok = json.loads(body)["token"]
+        self.assertNotEqual(old_tok, new_tok)
+        code, _ = self._post("/api/report", {"ts": int(time.time())}, token=old_tok, csrf=False)
+        self.assertEqual(code, 403)
+        code, _ = self._post("/api/report", {"ts": int(time.time())}, token=new_tok, csrf=False)
+        self.assertEqual(code, 200)
+
+    def test_admin_list_has_online_and_tags(self):
+        code, body = self._post("/api/nodes", {"alias": "列表机", "tags": [{"t": "A", "c": "#34d399"}]},
+                                token="admin-test")
+        nid = json.loads(body)["id"]
+        code, body = self._get("/api/nodes", token="admin-test")
+        self.assertEqual(code, 200)
+        node = [n for n in json.loads(body)["nodes"] if n["id"] == nid][0]
+        self.assertIn("online", node)
+        self.assertIn("used_bytes", node)
+        self.assertEqual(node["tags"][0]["t"], "A")
+        self.assertNotIn("token_hash", node)
 
     def test_groups_in_summary(self):
         """老数据只填了 grp 时，摘要也要给出 groups 列表（前端筛选要用）"""

@@ -66,6 +66,7 @@
   .ico svg{width:22px;height:22px;display:block}
   .ico.os{color:var(--text);opacity:.8}
   .ico.os:hover{opacity:1}
+  .tag.ctag{font-variant-numeric:tabular-nums;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .tags{display:flex;align-items:center;gap:6px;margin:8px 0 12px;flex-wrap:wrap}
   .tag{font-size:11px;padding:1.5px 8px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
   .tag.v4{color:#60a5fa;border-color:rgba(96,165,250,.45)}
@@ -476,6 +477,8 @@ function card(n) {
     </div>
     <div class="tags">
       ${nodeGroups(n).slice(0, 3).map(g => `<span class="tag">${esc(g)}</span>`).join("")}
+      ${(n.tags || []).map(t => `<span class="tag ctag" title="${esc(t.t)}"
+        style="color:${safeColor(t.c)};border-color:${safeColor(t.c)}55;background:${safeColor(t.c)}1f">${esc(t.t)}</span>`).join("")}
       <span class="tag ${fam}">${fam.toUpperCase()}</span>
       <span class="tag ${n.online ? "on" : "off"}" style="margin-left:auto">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span>
     </div>
@@ -539,6 +542,7 @@ function writeFilterToUrl() {
   const qs = q.toString();
   history.replaceState(null, "", location.pathname + (qs ? "?" + qs : "") + location.hash);
 }
+const safeColor = c => /^#[0-9a-fA-F]{3,6}$/.test(String(c || "")) ? c : "#fbbf24";
 const nodeGroups = n => (n.groups && n.groups.length) ? n.groups : (n.group ? [n.group] : []);
 function visibleNodes() {
   return (NODES || []).filter(n => {

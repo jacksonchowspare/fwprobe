@@ -21,9 +21,11 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -34,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.4.8"
+VERSION = "0.5.0"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -117,6 +119,16 @@ CREATE TABLE IF NOT EXISTS checks_min (
     ok INTEGER, loss REAL, ravg REAL, rmax REAL,
     PRIMARY KEY (node_id, ts, name)
 );
+CREATE TABLE IF NOT EXISTS audit (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      INTEGER NOT NULL,
+    action  TEXT NOT NULL,
+    target  TEXT DEFAULT '',
+    detail  TEXT DEFAULT '',
+    ip      TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
+
 CREATE TABLE IF NOT EXISTS incidents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     node_id TEXT NOT NULL,
@@ -202,6 +214,103 @@ def dump_groups(groups):
     return json.dumps([str(g).strip() for g in (groups or []) if str(g).strip()], ensure_ascii=False)
 
 
+TAG_MAX = 6                  # 每台最多 6 个自定义标签
+TAG_TEXT_MAX = 24            # 标签文字最多 24 个字符
+TAG_COLORS = ["#fbbf24", "#34d399", "#4da3ff", "#a78bfa", "#f472b6",
+              "#fb923c", "#22d3ee", "#94a3b8", "#f43f5e", "#a3e635"]
+
+
+SESSION_COOKIE = "iprobe_sess"
+SESSION_TTL = 12 * 3600
+LOGIN_FAIL_WINDOW = 600        # 10 分钟
+LOGIN_FAIL_MAX = 5             # 同一 IP 最多错 5 次
+_login_fails = {}              # ip -> [失败时间戳]
+_login_lock = threading.Lock()
+
+
+def make_session(admin_token, ttl=SESSION_TTL):
+    exp = int(time.time()) + ttl
+    sig = hmac.new(admin_token.encode("utf-8"), str(exp).encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}", exp
+
+
+def read_session(cookie_header, admin_token):
+    """返回剩余秒数（>0 有效），否则 0"""
+    if not cookie_header or not admin_token:
+        return 0
+    for part in cookie_header.split(";"):
+        k, _, v = part.strip().partition("=")
+        if k != SESSION_COOKIE:
+            continue
+        exp, _, sig = v.partition(".")
+        if not exp.isdigit() or not sig:
+            return 0
+        want = hmac.new(admin_token.encode("utf-8"), exp.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, want):
+            return 0
+        return max(0, int(exp) - int(time.time()))
+    return 0
+
+
+def login_allowed(ip):
+    now = int(time.time())
+    with _login_lock:
+        hits = [t for t in _login_fails.get(ip, []) if now - t < LOGIN_FAIL_WINDOW]
+        _login_fails[ip] = hits
+        return len(hits) < LOGIN_FAIL_MAX, LOGIN_FAIL_WINDOW - (now - hits[0]) if hits else 0
+
+
+def note_login_fail(ip):
+    with _login_lock:
+        _login_fails.setdefault(ip, []).append(int(time.time()))
+
+
+def clear_login_fail(ip):
+    with _login_lock:
+        _login_fails.pop(ip, None)
+
+
+def _clean_color(c):
+    """颜色只接受 #rgb / #rrggbb，其它一律回落到预设第一色（防止把 CSS 注进去）"""
+    c = str(c or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", c) or re.fullmatch(r"#[0-9a-fA-F]{3}", c):
+        return c.lower()
+    return TAG_COLORS[0]
+
+
+def parse_tags(raw):
+    """标签列：JSON 数组 [{"t": 文字, "c": 颜色}]，脏数据直接丢掉"""
+    if not raw:
+        return []
+    try:
+        v = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return []
+    out = []
+    for item in (v if isinstance(v, list) else []):
+        if isinstance(item, dict):
+            t = str(item.get("t") or "").strip()[:TAG_TEXT_MAX]
+            c = _clean_color(item.get("c"))
+        else:
+            t, c = str(item).strip()[:TAG_TEXT_MAX], TAG_COLORS[0]
+        if t:
+            out.append({"t": t, "c": c})
+        if len(out) >= TAG_MAX:
+            break
+    return out
+
+
+def sanitize_tags(tags):
+    """对外部输入做清洗：字符串/数组都收，去空、限长、限数量"""
+    if isinstance(tags, str):
+        tags = [{"t": x, "c": TAG_COLORS[0]} for x in tags.split(",")]
+    return parse_tags(tags if isinstance(tags, list) else [])
+
+
+def dump_tags(tags):
+    return json.dumps(sanitize_tags(tags), ensure_ascii=False)
+
+
 class Store:
     def __init__(self, path: str):
         self.path = path
@@ -218,16 +327,16 @@ class Store:
         self._migrate()
 
     # -- 节点 ---------------------------------------------------------------
-    def add_node(self, alias, grp="", quota_bytes=0, expires_at="", note="", groups=None):
+    def add_node(self, alias, grp="", quota_bytes=0, expires_at="", note="", groups=None, tags=None):
         nid = secrets.token_hex(6)
         tok = new_token()
         glist = [g.strip() for g in (groups if groups is not None else ([grp] if grp else [])) if g and g.strip()]
         with self.lock:
             self.conn.execute(
-                "INSERT INTO nodes(id,alias,grp,groups,token_hash,quota_bytes,expires_at,note,created)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
-                (nid, alias, (glist[0] if glist else ""), dump_groups(glist), sha256_hex(tok),
-                 int(quota_bytes or 0), expires_at or "", note or "", int(time.time())))
+                "INSERT INTO nodes(id,alias,grp,groups,tags,token_hash,quota_bytes,expires_at,note,created)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (nid, alias, (glist[0] if glist else ""), dump_groups(glist), dump_tags(tags),
+                 sha256_hex(tok), int(quota_bytes or 0), expires_at or "", note or "", int(time.time())))
             self.conn.commit()
         return nid, tok
 
@@ -248,6 +357,9 @@ class Store:
             for r in self.conn.execute("SELECT id,grp FROM nodes WHERE grp != ''").fetchall():
                 self.conn.execute("UPDATE nodes SET groups=? WHERE id=?",
                                   (dump_groups([r[1]]), r[0]))
+            self.conn.commit()
+        if "tags" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN tags TEXT DEFAULT ''")
             self.conn.commit()
 
     def nodes(self):
@@ -270,7 +382,10 @@ class Store:
             glist = [str(g).strip() for g in (fields.pop("groups") or []) if str(g).strip()]
             fields["groups"] = dump_groups(glist)
             fields["grp"] = glist[0] if glist else ""       # grp 保留为主分组，兼容旧代码
-        allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled", "country"}
+        if "tags" in fields:
+            fields["tags"] = dump_tags(fields.pop("tags"))
+        allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled",
+                   "country", "tags"}
         kv = {k: v for k, v in fields.items() if k in allowed}
         if not kv:
             return False
@@ -279,6 +394,17 @@ class Store:
             cur = self.conn.execute(sql, (*kv.values(), nid))
             self.conn.commit()
             return cur.rowcount > 0
+
+    def audit(self, action, target="", detail="", ip=""):
+        with self.lock:
+            self.conn.execute("INSERT INTO audit(ts,action,target,detail,ip) VALUES(?,?,?,?,?)",
+                              (int(time.time()), action, target or "", detail or "", ip or ""))
+            self.conn.commit()
+
+    def audit_list(self, limit=200):
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (int(limit),))]
 
     def delete_node(self, nid):
         with self.lock:
@@ -593,6 +719,7 @@ def public_summary(store: Store):
             "id": n["id"], "alias": n["alias"],
             "group": n.get("grp", ""),
             "groups": parse_groups(n.get("groups"), n.get("grp", "")),
+            "tags": parse_tags(n.get("tags")),
             "os_id": n.get("os_id", ""), "os_name": n.get("os_name", ""),
             "kernel": n.get("kernel", ""),
             "country": n.get("country", ""),
@@ -663,8 +790,17 @@ class Handler(BaseHTTPRequestHandler):
         return h[7:].strip() if h.lower().startswith("bearer ") else ""
 
     def _admin_ok(self):
+        """两种凭证都收：Authorization: Bearer <admin_token>，或登录后的会话 Cookie（后台页面用后者）"""
         tok = self.server.config.get("admin_token") or ""
-        return bool(tok) and secrets.compare_digest(self._bearer(), tok)
+        if not tok:
+            return False
+        if secrets.compare_digest(self._bearer(), tok):
+            return True
+        return read_session(self.headers.get("Cookie") or "", tok) > 0
+
+    def _csrf_ok(self):
+        """后台写操作必须带自定义头：跨站表单发不出这种请求（Cookie 已经是 SameSite=Strict，双保险）"""
+        return (self.headers.get("X-IPROBE") or "").strip() == "1"
 
     def _peer_ip(self):
         return self.client_address[0]
@@ -678,6 +814,23 @@ class Handler(BaseHTTPRequestHandler):
                                     "db_bytes": self.store.db_size()})
         if path in ("/", "/index.html"):
             return self._serve_static("index.html", "text/html; charset=utf-8")
+        if path in ("/admin", "/admin/"):
+            return self._serve_static("admin.html", "text/html; charset=utf-8")
+        if path == "/api/admin/me":
+            return self._send(200 if self._admin_ok() else 401, {"ok": self._admin_ok()})
+        if path == "/api/admin/audit":
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            return self._send(200, {"items": self.store.audit_list(200)})
+        if path == "/api/admin/groups":
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            tally = {}
+            for n in self.store.nodes():
+                for g in parse_groups(n.get("groups"), n.get("grp") or ""):
+                    tally[g] = tally.get(g, 0) + 1
+            return self._send(200, {"groups": [{"name": k, "count": v}
+                                               for k, v in sorted(tally.items())]})
         if path.startswith("/static/"):
             name = os.path.basename(path)
             ctype = "application/javascript" if name.endswith(".js") else \
@@ -698,10 +851,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/nodes":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
+            now = int(time.time())
             nodes = []
             for n in self.store.nodes():
                 n = dict(n)
                 n.pop("token_hash", None)
+                n["tags"] = parse_tags(n.get("tags"))
+                n["groups_list"] = parse_groups(n.get("groups"), n.get("grp") or "")
+                seen = int(n.get("last_seen") or 0)
+                n["online"] = bool(seen) and (now - seen < OFFLINE_AFTER)
+                rx, tx = self.store.totals(n["id"])
+                n["used_bytes"] = rx + tx
                 nodes.append(n)
             return self._send(200, {"nodes": nodes})
         if path == "/install-agent.sh":
@@ -712,6 +872,47 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/admin/login":
+            ip = self._peer_ip()
+            ok, wait = login_allowed(ip)
+            if not ok:
+                return self._send(429, {"error": f"尝试过于频繁，请 {wait // 60 + 1} 分钟后再试"})
+            data = self._json_body() or {}
+            tok = self.server.config.get("admin_token") or ""
+            given = str(data.get("token") or "").strip()
+            if not tok or not given or not secrets.compare_digest(given, tok):
+                note_login_fail(ip)
+                self.store.audit("login_fail", "", "", ip)
+                return self._send(401, {"error": "管理 token 不正确"})
+            clear_login_fail(ip)
+            value, exp = make_session(tok)
+            self.store.audit("login", "", "", ip)
+            cookie = (f"{SESSION_COOKIE}={value}; Path=/; Max-Age={exp - int(time.time())}; "
+                      "HttpOnly; SameSite=Strict; Secure")
+            return self._send(200, {"ok": True}, headers={"Set-Cookie": cookie})
+        if path == "/api/admin/logout":
+            cookie = f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure"
+            return self._send(200, {"ok": True}, headers={"Set-Cookie": cookie})
+        if path == "/api/admin/groups/rename":
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
+            data = self._json_body() or {}
+            src = str(data.get("from") or "").strip()
+            dst = str(data.get("to") or "").strip()
+            if not src or not dst:
+                return self._send(400, {"error": "from / to 必填"})
+            n = 0
+            for node in self.store.nodes():
+                gl = parse_groups(node.get("groups"), node.get("grp") or "")
+                if src not in gl:
+                    continue
+                gl = [dst if g == src else g for g in gl]
+                self.store.update_node(node["id"], groups=gl)
+                n += 1
+            self.store.audit("group_rename", src, f"→ {dst}，影响 {n} 台", self._peer_ip())
+            return self._send(200, {"ok": True, "nodes": n})
         if path == "/api/report":
             tok = self._bearer()
             if not tok:
@@ -727,21 +928,43 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/nodes":                      # 管理：新增节点
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
             data = self._json_body() or {}
             alias = (data.get("alias") or "").strip()
             if not alias:
                 return self._send(400, {"error": "alias 必填"})
-            nid, tok = self.store.add_node(alias, data.get("group", ""),
-                                           int(data.get("quota_bytes") or 0),
-                                           data.get("expires_at", ""), data.get("note", ""))
+            groups = data.get("groups")
+            if groups is None:
+                groups = data.get("group", "")
+                groups = [groups] if groups else []
+            nid, tok = self.store.add_node(alias, "", int(data.get("quota_bytes") or 0),
+                                           data.get("expires_at", ""), data.get("note", ""),
+                                           groups=groups, tags=data.get("tags") or [])
+            self.store.audit("node_add", alias, f"id={nid}", self._peer_ip())
             return self._send(200, {"id": nid, "token": tok})
-        if path.startswith("/api/nodes/"):            # 管理：改节点
+        if path.startswith("/api/nodes/"):            # 管理：改节点 / 轮换 token
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
-            nid = path[len("/api/nodes/"):].strip("/")
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
+            rest = path[len("/api/nodes/"):].strip("/")
+            if rest.endswith("/token"):               # 生成新 token，旧 token 立即失效
+                nid = rest[:-len("/token")].strip("/")
+                node = self.store.node(nid)
+                if not node:
+                    return self._send(404, {"error": "节点不存在"})
+                tok = self.store.rotate_token(nid)
+                self.store.audit("token_rotate", node.get("alias") or nid, f"id={nid}", self._peer_ip())
+                return self._send(200, {"id": nid, "token": tok})
+            nid = rest
             data = self._json_body() or {}
             if not self.store.update_node(nid, **data):
                 return self._send(404, {"error": "节点不存在或无有效字段"})
+            node = self.store.node(nid) or {}
+            changed = ",".join(k for k in data if k in
+                               {"alias", "groups", "tags", "quota_bytes", "expires_at", "note", "enabled", "country"})
+            self.store.audit("node_update", node.get("alias") or nid, changed, self._peer_ip())
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "not found"})
 
@@ -750,8 +973,12 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/nodes/"):
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
             nid = path[len("/api/nodes/"):].strip("/")
+            node = self.store.node(nid) or {}
             self.store.delete_node(nid)
+            self.store.audit("node_delete", node.get("alias") or nid, f"id={nid}", self._peer_ip())
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "not found"})
 

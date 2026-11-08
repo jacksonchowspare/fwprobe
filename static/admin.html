@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iProbe · 后台管理</title>
+<style>
+  :root{
+    --bg:#0b0f14; --card:rgba(26,33,43,.72); --solid:#141b23; --border:rgba(255,255,255,.10);
+    --text:#e6edf3; --muted:#8b98a9; --accent:#4da3ff; --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
+    --track:rgba(255,255,255,.10); --hover:rgba(255,255,255,.06);
+    --shadow:0 4px 20px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.04);
+  }
+  body[data-theme="light"]{
+    --bg:#eef2f7; --card:rgba(255,255,255,.88); --solid:#ffffff; --border:rgba(15,23,42,.12);
+    --text:#0f172a; --muted:#64748b; --accent:#2f6ff0; --ok:#16a34a; --warn:#b45309; --bad:#dc2626;
+    --track:rgba(15,23,42,.10); --hover:rgba(15,23,42,.05);
+    --shadow:0 6px 18px rgba(15,23,42,.08);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:22px 18px 60px;color:var(--text);font:14px/1.55 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
+    background:radial-gradient(900px 500px at 8% -10%, rgba(61,139,253,.16), transparent 60%),
+      radial-gradient(700px 420px at 100% 0%, rgba(34,197,94,.10), transparent 55%), var(--bg);
+    background-attachment:fixed;overflow-x:hidden}
+  a{color:var(--accent)}
+  .wrap{max-width:1180px;margin:0 auto}
+  header{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.2px}
+  .ver{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .sp{flex:1}
+  button{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
+    border-radius:9px;padding:6px 12px;cursor:pointer;white-space:nowrap;
+    transition:border-color .15s,background .15s}
+  button:hover{border-color:rgba(77,163,255,.5)}
+  button.primary{background:rgba(77,163,255,.16);border-color:rgba(77,163,255,.5);color:var(--text)}
+  button.danger:hover{border-color:rgba(248,113,113,.6)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  input,select{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
+    border-radius:9px;padding:7px 10px;width:100%}
+  input:focus,select:focus{outline:none;border-color:rgba(77,163,255,.55)}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:14px 16px}
+  .muted{color:var(--muted)}
+  .small{font-size:12px}
+  /* 登录 */
+  #login{max-width:380px;margin:12vh auto 0}
+  #login h1{font-size:20px;margin-bottom:4px}
+  #login .row{margin-top:12px}
+  #login .err{color:var(--bad);font-size:12.5px;min-height:18px;margin-top:8px}
+  /* 表格 */
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px dashed var(--border);vertical-align:middle;font-size:13px}
+  th{color:var(--muted);font-weight:500;font-size:12px;white-space:nowrap}
+  tr:last-child td{border-bottom:0}
+  .tag{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:999px;font-size:11.5px;
+    border:1px solid var(--border);background:var(--hover);white-space:nowrap}
+  .tags{display:flex;gap:4px;flex-wrap:wrap}
+  .dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--ok)}
+  .dot.off{background:var(--bad)}
+  .ops{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+  .ops button{padding:3px 9px;font-size:12px;border-radius:8px}
+  /* 弹窗 */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:none;
+    align-items:flex-start;justify-content:center;z-index:20;overflow:auto;padding:6vh 16px}
+  .mask.show{display:flex}
+  .dlg{width:100%;max-width:560px;background:var(--solid);border:1px solid var(--border);border-radius:14px;
+    box-shadow:0 20px 60px rgba(0,0,0,.5);padding:18px 20px}
+  .dlg h2{font-size:16px;margin:0 0 12px}
+  .f{margin-bottom:12px}
+  .f label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+  .f2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;font-size:12px;
+    border:1px solid var(--border);background:var(--hover);cursor:pointer;user-select:none}
+  .chip.on{border-color:rgba(77,163,255,.6);background:rgba(77,163,255,.18)}
+  .tagrow{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .tagrow input[type=text]{flex:1}
+  .sw{display:flex;gap:4px;flex-wrap:wrap}
+  .sw i{width:18px;height:18px;border-radius:5px;cursor:pointer;border:2px solid transparent;display:block}
+  .sw i.on{border-color:var(--text)}
+  .cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.6;
+    background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:9px;padding:10px 12px;
+    white-space:pre-wrap;word-break:break-all;margin:8px 0}
+  .hint{font-size:12px;color:var(--warn);margin:6px 0 0}
+  .dlgfoot{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  .audit{max-height:320px;overflow:auto;font-size:12.5px}
+  .audit div{display:flex;gap:10px;padding:5px 0;border-bottom:1px dashed var(--border)}
+  .audit b{font-weight:600}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .empty{padding:28px;text-align:center;color:var(--muted)}
+  @media (max-width:760px){
+    table,thead,tbody,tr,td,th{display:block}
+    thead{display:none}
+    tr{border:1px solid var(--border);border-radius:12px;margin-bottom:10px;padding:8px 10px}
+    td{border:0;padding:4px 0;display:flex;gap:10px}
+    td::before{content:attr(data-k);color:var(--muted);font-size:12px;min-width:56px;flex:none}
+    .ops{justify-content:flex-start}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 登录 -->
+  <div id="login" class="panel" hidden>
+    <h1>iProbe 后台</h1>
+    <div class="muted small">输入管理 token 登录。token 在中心服务器 <code>/etc/fwprobe/config.json</code> 里。</div>
+    <div class="row"><input id="tok" type="password" placeholder="管理 token" autocomplete="current-password"></div>
+    <div class="row"><button class="primary" style="width:100%" onclick="doLogin()">登录</button></div>
+    <div class="err" id="login_err"></div>
+  </div>
+
+  <!-- 主体 -->
+  <div id="main" hidden>
+    <header>
+      <h1>iProbe · 后台管理</h1>
+      <span class="ver" id="ver"></span>
+      <span class="sp"></span>
+      <a href="/" class="small" style="text-decoration:none">← 状态页</a>
+      <button class="small" onclick="toggleTheme()">白天模式</button>
+      <button class="small" onclick="doLogout()">退出</button>
+    </header>
+
+    <div class="panel">
+      <div class="toolbar">
+        <button class="primary" onclick="openAdd()">+ 新增节点</button>
+        <button onclick="load()">刷新</button>
+        <button onclick="openGroups()">分组管理</button>
+        <button onclick="openAudit()">操作日志</button>
+        <span class="sp"></span>
+        <span class="muted small" id="counts"></span>
+      </div>
+      <table>
+        <thead><tr>
+          <th>节点</th><th>分组</th><th>标签</th><th>状态</th><th>Agent</th><th>到期 / 配额</th><th></th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>还没有节点，点「+ 新增节点」开始。</div>
+    </div>
+  </div>
+</div>
+
+<!-- 编辑 / 新增 -->
+<div class="mask" id="m_edit">
+  <div class="dlg">
+    <h2 id="ed_title">编辑节点</h2>
+    <div class="f"><label>别名</label><input id="ed_alias" placeholder="例如 香港-1"></div>
+    <div class="f"><label>分组（可多选，也可新建）</label>
+      <div class="chips" id="ed_groups"></div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <input id="ed_newgroup" placeholder="新分组名，回车添加" onkeydown="if(event.key==='Enter')addGroupChip()">
+        <button onclick="addGroupChip()">添加</button>
+      </div>
+    </div>
+    <div class="f"><label>自定义标签（显示在卡片别名下方，最多 6 个）</label>
+      <div id="ed_tags"></div>
+      <div class="tagrow">
+        <input id="ed_tagtext" placeholder="例如 $49.99/mo" maxlength="24" onkeydown="if(event.key==='Enter')addTag()">
+        <button onclick="addTag()">添加</button>
+      </div>
+      <div class="sw" id="ed_swatches"></div>
+    </div>
+    <div class="f2">
+      <div class="f"><label>配额（GB，留空=不限）</label><input id="ed_quota" type="number" min="0" step="1" placeholder="不限"></div>
+      <div class="f"><label>到期日</label><input id="ed_expires" type="date"></div>
+    </div>
+    <div class="f"><label>备注（只在后台可见）</label><input id="ed_note" placeholder="可选"></div>
+    <div class="dlgfoot">
+      <button onclick="closeMask('m_edit')">取消</button>
+      <button class="primary" onclick="saveNode()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新增后的安装命令 -->
+<div class="mask" id="m_cmd">
+  <div class="dlg">
+    <h2 id="cmd_title">安装命令</h2>
+    <div class="muted small">在要监控的机器上以 root 执行：</div>
+    <div class="cmd" id="cmd_body"></div>
+    <div class="hint" id="cmd_hint">这条命令里的 token 只显示这一次，关掉就看不到了（可以随时「重发令牌」生成新的）。</div>
+    <div class="dlgfoot">
+      <button onclick="copyCmd()">复制命令</button>
+      <button class="primary" onclick="closeMask('m_cmd')">我已保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 分组管理 -->
+<div class="mask" id="m_groups">
+  <div class="dlg">
+    <h2>分组管理</h2>
+    <div class="muted small" style="margin-bottom:10px">重命名会同时改掉该组下所有节点。</div>
+    <div id="grp_list"></div>
+    <div class="dlgfoot"><button onclick="closeMask('m_groups')">关闭</button></div>
+  </div>
+</div>
+
+<!-- 审计 -->
+<div class="mask" id="m_audit">
+  <div class="dlg">
+    <h2>操作日志（最近 200 条）</h2>
+    <div class="audit" id="audit_list"></div>
+    <div class="dlgfoot"><button onclick="closeMask('m_audit')">关闭</button></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const API = (p, opt) => fetch(p, Object.assign({credentials: "same-origin",
+  headers: {"Content-Type": "application/json", "X-IPROBE": "1"}}, opt || {}));
+
+const COLORS = ["#fbbf24","#34d399","#4da3ff","#a78bfa","#f472b6","#fb923c","#22d3ee","#94a3b8","#f43f5e","#a3e635"];
+let NODES = [], GROUPS = [], EDITING = null, TAGS = [], PICK = COLORS[0];
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const safeColor = c => /^#[0-9a-fA-F]{3,6}$/.test(String(c || "")) ? c : COLORS[0];
+const fmtBytes = n => {
+  if (n == null || isNaN(n)) return "-";
+  if (n === 0) return "0 B";
+  const u = ["B","KB","MB","GB","TB"]; let i = 0, v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v >= 100 ? Math.round(v) : v.toFixed(v >= 10 ? 1 : 2)) + " " + u[i];
+};
+const flag = c => {
+  const s = String(c || "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(s)) return "🌐";
+  return String.fromCodePoint(...[...s].map(ch => 127397 + ch.charCodeAt(0)));
+};
+function ago(ts) {
+  if (!ts) return "从未";
+  const d = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (d < 60) return d + " 秒前";
+  if (d < 3600) return Math.floor(d / 60) + " 分钟前";
+  if (d < 86400) return Math.floor(d / 3600) + " 小时前";
+  return Math.floor(d / 86400) + " 天前";
+}
+
+/* ── 主题 ── */
+function setTheme(t) {
+  document.body.dataset.theme = t;
+  localStorage.setItem("iprobe_theme", t);
+  const b = $("theme_btn"); if (b) b.textContent = t === "dark" ? "白天模式" : "夜间模式";
+  document.querySelectorAll("[onclick='toggleTheme()']").forEach(x => x.textContent = t === "dark" ? "白天模式" : "夜间模式");
+}
+function toggleTheme() { setTheme(document.body.dataset.theme === "dark" ? "light" : "dark"); }
+
+/* ── 登录 ── */
+async function boot() {
+  const r = await fetch("/api/admin/me", {credentials: "same-origin"});
+  if (r.ok) { $("login").hidden = true; $("main").hidden = false; load(); }
+  else { $("login").hidden = false; $("main").hidden = true; $("tok").focus(); }
+}
+async function doLogin() {
+  $("login_err").textContent = "";
+  const r = await API("/api/admin/login", {method: "POST", body: JSON.stringify({token: $("tok").value.trim()})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $("login_err").textContent = d.error || "登录失败"; return; }
+  $("tok").value = "";
+  boot();
+}
+async function doLogout() {
+  await API("/api/admin/logout", {method: "POST"});
+  location.reload();
+}
+
+/* ── 数据 ── */
+async function load() {
+  const [r1, r2] = await Promise.all([API("/api/nodes"), API("/api/admin/groups")]);
+  if (r1.status === 401) { $("main").hidden = true; $("login").hidden = false; return; }
+  NODES = ((await r1.json()).nodes || []);
+  GROUPS = (await r2.json()).groups || [];
+  renderRows();
+}
+function renderRows() {
+  $("empty").hidden = NODES.length > 0;
+  $("counts").textContent = NODES.length ? `共 ${NODES.length} 台` : "";
+  $("rows").innerHTML = NODES.map(n => {
+    const gl = n.groups_list || [];
+    const tags = (n.tags || []).map(t =>
+      `<span class="tag" style="color:${safeColor(t.c)};border-color:${safeColor(t.c)}55;background:${safeColor(t.c)}1f">${esc(t.t)}</span>`).join("");
+    const quota = n.quota_bytes ? `${fmtBytes(n.used_bytes || 0)} / ${fmtBytes(n.quota_bytes)}` : "不限";
+    const exp = n.expires_at || "—";
+    return `<tr>
+      <td data-k="节点"><b>${flag(n.country)} ${esc(n.alias || n.id)}</b>
+        <div class="muted small">${esc(n.os_name || n.os_id || "")}</div></td>
+      <td data-k="分组"><div class="tags">${gl.length ? gl.map(g => `<span class="tag">${esc(g)}</span>`).join("") : '<span class="muted small">—</span>'}</div></td>
+      <td data-k="标签"><div class="tags">${tags || '<span class="muted small">—</span>'}</div></td>
+      <td data-k="状态"><span class="dot ${n.online ? "" : "off"}"></span>
+        <span class="small">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span></td>
+      <td data-k="Agent" class="small muted">${esc(n.agent_ver || "—")}</td>
+      <td data-k="到期/配额" class="small">${esc(exp)}<div class="muted">${quota}</div></td>
+      <td data-k="操作"><div class="ops">
+        <button onclick="openEdit('${n.id}')">编辑</button>
+        <button onclick="rotate('${n.id}')">重发令牌</button>
+        <button class="danger" onclick="delNode('${n.id}')">删除</button>
+      </div></td>
+    </tr>`;
+  }).join("");
+}
+
+/* ── 弹窗通用 ── */
+const openMask = id => $(id).classList.add("show");
+const closeMask = id => $(id).classList.remove("show");
+
+/* ── 编辑 / 新增 ── */
+function allGroupNames() {
+  const set = new Set(GROUPS.map(g => g.name));
+  NODES.forEach(n => (n.groups_list || []).forEach(g => set.add(g)));
+  return [...set].sort();
+}
+function openAdd() {
+  EDITING = null;
+  $("ed_title").textContent = "新增节点";
+  $("ed_alias").value = "";
+  $("ed_quota").value = "";
+  $("ed_expires").value = "";
+  $("ed_note").value = "";
+  $("ed_newgroup").value = "";
+  TAGS = [];
+  PICK = COLORS[0];
+  renderGroupChips([]);
+  renderTags();
+  renderSwatches();
+  openMask("m_edit");
+  setTimeout(() => $("ed_alias").focus(), 50);
+}
+function openEdit(id) {
+  const n = NODES.find(x => x.id === id);
+  if (!n) return;
+  EDITING = id;
+  $("ed_title").textContent = "编辑节点 · " + (n.alias || n.id);
+  $("ed_alias").value = n.alias || "";
+  $("ed_quota").value = n.quota_bytes ? Math.round(n.quota_bytes / 1024 / 1024 / 1024) || "" : "";
+  $("ed_expires").value = n.expires_at || "";
+  $("ed_note").value = n.note || "";
+  $("ed_newgroup").value = "";
+  TAGS = (n.tags || []).map(t => ({t: t.t, c: safeColor(t.c)}));
+  PICK = COLORS[0];
+  renderGroupChips(n.groups_list || []);
+  renderTags();
+  renderSwatches();
+  openMask("m_edit");
+}
+let SEL_GROUPS = new Set();
+function renderGroupChips(selected) {
+  SEL_GROUPS = new Set(selected || []);
+  const names = allGroupNames();
+  $("ed_groups").innerHTML = names.length ? names.map(g =>
+    `<span class="chip ${SEL_GROUPS.has(g) ? "on" : ""}" onclick="toggleGroupChip('${esc(g).replace(/'/g, "\\'")}')">${esc(g)}</span>`).join("")
+    : '<span class="muted small">还没有分组，下面新建一个</span>';
+}
+function toggleGroupChip(g) {
+  SEL_GROUPS.has(g) ? SEL_GROUPS.delete(g) : SEL_GROUPS.add(g);
+  renderGroupChips([...SEL_GROUPS]);
+}
+function addGroupChip() {
+  const v = $("ed_newgroup").value.trim();
+  if (!v) return;
+  SEL_GROUPS.add(v);
+  if (!GROUPS.some(g => g.name === v)) GROUPS.push({name: v, count: 0});
+  $("ed_newgroup").value = "";
+  renderGroupChips([...SEL_GROUPS]);
+}
+function renderSwatches() {
+  $("ed_swatches").innerHTML = COLORS.map(c =>
+    `<i class="${c === PICK ? "on" : ""}" style="background:${c}" onclick="pickColor('${c}')" title="${c}"></i>`).join("") +
+    `<input type="color" value="${PICK}" style="width:34px;height:22px;padding:0;border:none;background:none;cursor:pointer" onchange="pickColor(this.value)">`;
+}
+function pickColor(c) { PICK = safeColor(c); renderSwatches(); }
+function renderTags() {
+  $("ed_tags").innerHTML = TAGS.map((t, i) =>
+    `<div class="tagrow">
+      <span class="tag" style="color:${t.c};border-color:${t.c}55;background:${t.c}1f">${esc(t.t)}</span>
+      <span class="muted small">${t.c}</span>
+      <span class="sp" style="flex:1"></span>
+      <button onclick="rmTag(${i})">删除</button>
+    </div>`).join("") || '<div class="muted small" style="margin-bottom:6px">还没有标签</div>';
+}
+function addTag() {
+  const v = $("ed_tagtext").value.trim().slice(0, 24);
+  if (!v) return;
+  if (TAGS.length >= 6) { alert("最多 6 个标签"); return; }
+  TAGS.push({t: v, c: PICK});
+  $("ed_tagtext").value = "";
+  renderTags();
+}
+function rmTag(i) { TAGS.splice(i, 1); renderTags(); }
+
+async function saveNode() {
+  const alias = $("ed_alias").value.trim();
+  if (!alias) { alert("别名必填"); return; }
+  const quotaGb = Number($("ed_quota").value || 0);
+  const body = {
+    alias,
+    groups: [...SEL_GROUPS],
+    tags: TAGS,
+    quota_bytes: quotaGb > 0 ? Math.round(quotaGb * 1024 * 1024 * 1024) : 0,
+    expires_at: $("ed_expires").value || "",
+    note: $("ed_note").value.trim()
+  };
+  const r = EDITING
+    ? await API("/api/nodes/" + EDITING, {method: "POST", body: JSON.stringify(body)})
+    : await API("/api/nodes", {method: "POST", body: JSON.stringify(body)});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "保存失败"); return; }
+  closeMask("m_edit");
+  await load();
+  if (!EDITING && d.token) showCmd(d.token, alias, false);
+}
+
+/* ── 安装命令 ── */
+function installCmd(token) {
+  const base = location.origin;
+  return `curl -fsSL ${base}/install-agent.sh | sudo bash -s -- --token ${token} --server ${base}`;
+}
+function showCmd(token, alias, isRotate) {
+  $("cmd_title").textContent = (isRotate ? "新的安装命令" : "节点已创建") + (alias ? " · " + alias : "");
+  $("cmd_body").textContent = installCmd(token);
+  openMask("m_cmd");
+}
+async function copyCmd() {
+  try {
+    await navigator.clipboard.writeText($("cmd_body").textContent);
+    $("cmd_body").style.outline = "1px solid var(--ok)";
+    setTimeout(() => $("cmd_body").style.outline = "", 800);
+  } catch (e) { alert("复制失败，请手动选中复制"); }
+}
+async function rotate(id) {
+  const n = NODES.find(x => x.id === id);
+  if (!confirm(`给「${n && n.alias ? n.alias : id}」生成新 token？旧的会立刻失效，已装的 agent 会停止上报直到换上新 token。`)) return;
+  const r = await API(`/api/nodes/${id}/token`, {method: "POST"});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "操作失败"); return; }
+  showCmd(d.token, n && n.alias, true);
+  load();
+}
+async function delNode(id) {
+  const n = NODES.find(x => x.id === id);
+  if (!confirm(`删除「${n && n.alias ? n.alias : id}」？该节点的历史监控数据也会一起删掉，不可恢复。`)) return;
+  const r = await API("/api/nodes/" + id, {method: "DELETE"});
+  if (!r.ok) { alert("删除失败"); return; }
+  load();
+}
+
+/* ── 分组管理 ── */
+function openGroups() {
+  $("grp_list").innerHTML = GROUPS.length ? GROUPS.map(g => `
+    <div class="tagrow">
+      <input value="${esc(g.name)}" id="gr_${esc(g.name).replace(/[^a-zA-Z0-9]/g, "_")}" data-old="${esc(g.name)}">
+      <span class="muted small" style="white-space:nowrap">${g.count} 台</span>
+      <button onclick="renameGroup(this)">重命名</button>
+    </div>`).join("") : '<div class="muted small">还没有分组</div>';
+  openMask("m_groups");
+}
+async function renameGroup(btn) {
+  const row = btn.closest(".tagrow");
+  const input = row.querySelector("input");
+  const from = input.dataset.old, to = input.value.trim();
+  if (!to || to === from) return;
+  const r = await API("/api/admin/groups/rename", {method: "POST", body: JSON.stringify({from, to})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "重命名失败"); return; }
+  closeMask("m_groups");
+  await load();
+}
+
+/* ── 审计 ── */
+async function openAudit() {
+  const r = await API("/api/admin/audit");
+  const d = await r.json().catch(() => ({items: []}));
+  const name = {node_add: "新增节点", node_update: "修改节点", node_delete: "删除节点",
+                token_rotate: "重发令牌", group_rename: "分组重命名", login: "登录", login_fail: "登录失败"};
+  $("audit_list").innerHTML = (d.items || []).map(a =>
+    `<div><span class="muted" style="min-width:132px">${new Date(a.ts * 1000).toLocaleString("zh-CN")}</span>
+      <b>${esc(name[a.action] || a.action)}</b><span>${esc(a.target || "")}</span>
+      <span class="muted">${esc(a.detail || "")}</span>
+      <span class="muted" style="margin-left:auto">${esc(a.ip || "")}</span></div>`).join("")
+    || '<div class="muted">暂无记录</div>';
+  openMask("m_audit");
+}
+
+/* ── 启动 ── */
+document.addEventListener("DOMContentLoaded", () => {
+  setTheme(localStorage.getItem("iprobe_theme") || "dark");
+  $("tok").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+  document.querySelectorAll(".mask").forEach(m =>
+    m.addEventListener("click", e => { if (e.target === m) m.classList.remove("show"); }));
+  boot();
+});
+</script>
+</body>
+</html>
