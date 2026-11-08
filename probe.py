@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.3"
+VERSION = "0.5.5"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     quota_bytes INTEGER DEFAULT 0,      -- 0 = 不限量
     expires_at  TEXT DEFAULT '',        -- YYYY-MM-DD，空 = 未填
     agent_ver   TEXT DEFAULT '',
+    target_ver  TEXT DEFAULT '',      -- 升级目标版本，agent 升到后清空
     note        TEXT DEFAULT '',
     enabled     INTEGER DEFAULT 1,
     created     INTEGER DEFAULT 0,
@@ -119,6 +120,15 @@ CREATE TABLE IF NOT EXISTS checks_min (
     ok INTEGER, loss REAL, ravg REAL, rmax REAL,
     PRIMARY KEY (node_id, ts, name)
 );
+CREATE TABLE IF NOT EXISTS ptokens (
+    id        TEXT PRIMARY KEY,
+    label     TEXT DEFAULT '',
+    token_hash TEXT NOT NULL,
+    created   INTEGER NOT NULL,
+    last_used INTEGER DEFAULT 0,
+    enabled   INTEGER DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS audit (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     ts      INTEGER NOT NULL,
@@ -212,6 +222,28 @@ def parse_groups(raw, fallback=""):
 
 def dump_groups(groups):
     return json.dumps([str(g).strip() for g in (groups or []) if str(g).strip()], ensure_ascii=False)
+
+
+UPGRADE_MIN_VER = (0, 5, 4)     # 从这版起 agent 才认升级指令，更老的要手动升一次
+
+
+def _ver_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v or "").strip().split("."))
+    except ValueError:
+        return (0,)
+
+
+def agent_file_meta():
+    """中心发布的 agent.py 版本 + sha256（读不到就返回空，升级功能自动降级为不可用）"""
+    path = os.path.join(BASE_DIR, "agent.py")
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return "", ""
+    m = re.search(rb'^VERSION\s*=\s*"([0-9][0-9.]*)"', raw, re.M)
+    return ((m.group(1).decode() if m else ""), hashlib.sha256(raw).hexdigest())
 
 
 TAG_MAX = 6                  # 每台最多 6 个自定义标签
@@ -390,6 +422,9 @@ class Store:
         if "tags" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN tags TEXT DEFAULT ''")
             self.conn.commit()
+        if "target_ver" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN target_ver TEXT DEFAULT ''")
+            self.conn.commit()
 
     def nodes(self):
         with self.lock:
@@ -414,13 +449,47 @@ class Store:
         if "tags" in fields:
             fields["tags"] = dump_tags(fields.pop("tags"))
         allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled",
-                   "country", "tags"}
+                   "country", "tags", "target_ver"}
         kv = {k: v for k, v in fields.items() if k in allowed}
         if not kv:
             return False
         sql = "UPDATE nodes SET " + ",".join(f"{k}=?" for k in kv) + " WHERE id=?"
         with self.lock:
             cur = self.conn.execute(sql, (*kv.values(), nid))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    # ---------- 供应令牌（给 fwpanel2 之类的外部面板建节点用；只能在中心本机生成） ----------
+    def add_ptoken(self, label=""):
+        pid = secrets.token_hex(6)
+        tok = "pv_" + secrets.token_urlsafe(32)
+        with self.lock:
+            self.conn.execute("INSERT INTO ptokens(id,label,token_hash,created,enabled) VALUES(?,?,?,?,1)",
+                              (pid, (label or "").strip()[:60], sha256_hex(tok), int(time.time())))
+            self.conn.commit()
+        return pid, tok
+
+    def find_ptoken(self, tok):
+        if not tok:
+            return None
+        h = sha256_hex(tok)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM ptokens WHERE token_hash=? AND enabled=1", (h,)).fetchone()
+            if row:
+                self.conn.execute("UPDATE ptokens SET last_used=? WHERE id=?",
+                                  (int(time.time()), row["id"]))
+                self.conn.commit()
+        return dict(row) if row else None
+
+    def list_ptokens(self):
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT id,label,created,last_used,enabled FROM ptokens ORDER BY created DESC")]
+
+    def del_ptoken(self, pid):
+        with self.lock:
+            cur = self.conn.execute("DELETE FROM ptokens WHERE id=?", (pid,))
             self.conn.commit()
             return cur.rowcount > 0
 
@@ -887,6 +956,7 @@ class Handler(BaseHTTPRequestHandler):
                 n.pop("token_hash", None)
                 n["tags"] = parse_tags(n.get("tags"))
                 n["groups_list"] = parse_groups(n.get("groups"), n.get("grp") or "")
+                n["can_self_upgrade"] = _ver_tuple(n.get("agent_ver")) >= UPGRADE_MIN_VER
                 seen = int(n.get("last_seen") or 0)
                 n["online"] = bool(seen) and (now - seen < OFFLINE_AFTER)
                 rx, tx = self.store.totals(n["id"])
@@ -951,6 +1021,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, {"error": f"写配置失败：{exc}"})
             self.store.audit("passwd_change", "", "已设置" if new_pw else "已清除", self._peer_ip())
             return self._send(200, {"ok": True})
+        if path == "/api/admin/upgrade":             # 一键升级（可传 ids 或 all）
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
+            meta_ver, _ = agent_file_meta()
+            if not meta_ver:
+                return self._send(500, {"error": "中心缺少 agent.py，无法升级"})
+            data = self._json_body() or {}
+            ids = data.get("ids")
+            targets = self.store.nodes() if data.get("all") else \
+                [n for n in self.store.nodes() if n["id"] in set(ids or [])]
+            done = []
+            for n in targets:
+                if str(n.get("agent_ver") or "") == meta_ver:
+                    continue
+                self.store.update_node(n["id"], target_ver=meta_ver)
+                done.append(n["alias"] or n["id"])
+            self.store.audit("agent_upgrade_batch", f"{len(done)} 台", f"→ {meta_ver}", self._peer_ip())
+            return self._send(200, {"ok": True, "target": meta_ver, "queued": done})
+        if path == "/api/admin/meta":
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            meta_ver, meta_sha = agent_file_meta()
+            return self._send(200, {"version": VERSION, "agent_version": meta_ver,
+                                    "agent_sha256": meta_sha})
         if path == "/api/admin/groups/rename":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
@@ -982,7 +1078,41 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 return self._send(400, {"error": "请求体不是合法 JSON"})
             ts = self.store.ingest(node, payload, self._peer_ip())
-            return self._send(200, {"ok": True, "ts": ts})
+            resp = {"ok": True, "ts": ts}
+            agent_ver = str(payload.get("agent") or "").strip()
+            tgt = str(node.get("target_ver") or "").strip()
+            meta_ver, meta_sha = agent_file_meta()
+            if tgt and agent_ver and agent_ver == tgt:
+                self.store.update_node(node["id"], target_ver="")     # 升级完成，撤掉标记
+            elif tgt and meta_ver and tgt == meta_ver and agent_ver != meta_ver:
+                base = (self.server.config.get("base_url") or "").rstrip("/")
+                resp["upgrade"] = {"version": meta_ver,
+                                   "url": base + "/agent.py",
+                                   "sha256": meta_sha}
+            return self._send(200, resp)
+        if path == "/api/provision/node":             # 外部面板（fwpanel2）按需建探针节点
+            ptok = self.store.find_ptoken(self._bearer())
+            if not ptok:
+                return self._send(401, {"error": "供应令牌无效"})
+            data = self._json_body() or {}
+            alias = (data.get("alias") or "").strip()[:40]
+            if not alias:
+                return self._send(400, {"error": "alias 必填"})
+            groups = data.get("groups")
+            if groups is None:
+                g = data.get("group", "")
+                groups = [g] if g else []
+            tags = data.get("tags") or []
+            nid, tok = self.store.add_node(alias, "", int(data.get("quota_bytes") or 0),
+                                           data.get("expires_at", ""),
+                                           f"由供应令牌「{ptok.get('label') or ptok.get('id')}」创建",
+                                           groups=groups, tags=tags)
+            base = (self.server.config.get("base_url") or "").rstrip("/")
+            self.store.audit("provision", alias, f"id={nid} via {ptok.get('label') or ptok.get('id')}",
+                             self._peer_ip())
+            return self._send(200, {"id": nid, "token": tok, "server": base,
+                                    "command": f"curl -fsSL {base}/install-agent.sh | "
+                                               f"sudo bash -s -- --token {tok} --server {base}"})
         if path == "/api/nodes":                      # 管理：新增节点
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
@@ -1007,6 +1137,20 @@ class Handler(BaseHTTPRequestHandler):
             if not self._csrf_ok():
                 return self._send(403, {"error": "缺少 X-IPROBE 头"})
             rest = path[len("/api/nodes/"):].strip("/")
+            if rest.endswith("/upgrade"):             # 下发升级指令（agent 下次上报时执行）
+                nid = rest[:-len("/upgrade")].strip("/")
+                node = self.store.node(nid)
+                if not node:
+                    return self._send(404, {"error": "节点不存在"})
+                meta_ver, meta_sha = agent_file_meta()
+                if not meta_ver:
+                    return self._send(500, {"error": "中心缺少 agent.py，无法升级"})
+                if str(node.get("agent_ver") or "") == meta_ver:
+                    return self._send(400, {"error": f"已经是 {meta_ver}"})
+                self.store.update_node(nid, target_ver=meta_ver)
+                self.store.audit("agent_upgrade", node.get("alias") or nid,
+                                 f"→ {meta_ver}", self._peer_ip())
+                return self._send(200, {"ok": True, "target": meta_ver})
             if rest.endswith("/token"):               # 生成新 token，旧 token 立即失效
                 nid = rest[:-len("/token")].strip("/")
                 node = self.store.node(nid)
@@ -1149,6 +1293,28 @@ def cmd_passwd(args):
     return 0
 
 
+def cmd_ptoken(args):
+    store = Store(load_config()["db"])
+    if args.action == "add":
+        pid, tok = store.add_ptoken(args.value or "")
+        print(f"已生成供应令牌 id={pid}（标签：{args.value or '无'}）")
+        print(tok)
+        print("只显示这一次，丢了就 rm 掉重新生成。", file=sys.stderr)
+        return 0
+    if args.action == "rm":
+        ok = store.del_ptoken(args.value)
+        print("已删除。" if ok else "没有这个 id。")
+        return 0 if ok else 1
+    rows = store.list_ptokens()
+    if not rows:
+        print("还没有供应令牌。生成：probe.py ptoken add -- 备注名")
+        return 0
+    for r in rows:
+        last = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["last_used"])) if r["last_used"] else "从未使用"
+        print(f"{r['id']}  {r['label'] or '-'}  最后一次使用：{last}")
+    return 0
+
+
 def cmd_token(_args):
     cfg = load_config()
     tok = cfg.get("admin_token") or ""
@@ -1210,6 +1376,9 @@ def main(argv=None):
     p.add_argument("--note", default="")
     p.add_argument("--server", default="", help="对外地址（默认取配置 base_url）")
 
+    p = sub.add_parser("ptoken")
+    p.add_argument("action", choices=["add", "list", "rm"], nargs="?", default="list")
+    p.add_argument("value", nargs="?", default="", help="add 时是标签，rm 时是令牌 id")
     p = sub.add_parser("passwd"); p.add_argument("--clear", action="store_true",
                                                  help="清除后台密码，只保留 token 登录")
     sub.add_parser("token")
@@ -1220,7 +1389,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     fn = {"serve": cmd_serve, "addnode": cmd_addnode, "listnodes": cmd_listnodes,
           "rmtoken": cmd_rmtoken, "delnode": cmd_delnode,
-          "passwd": cmd_passwd, "token": cmd_token}.get(args.cmd)
+          "passwd": cmd_passwd, "token": cmd_token, "ptoken": cmd_ptoken}.get(args.cmd)
     if not fn:
         ap.print_help()
         return 2

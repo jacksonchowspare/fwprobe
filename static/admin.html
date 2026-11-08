@@ -132,6 +132,7 @@
         <button onclick="load()">刷新</button>
         <button onclick="openGroups()">分组管理</button>
         <button onclick="openAudit()">操作日志</button>
+        <button class="primary" id="up_all" onclick="upgradeAll()" hidden></button>
         <span class="sp"></span>
         <span class="muted small" id="counts"></span>
       </div>
@@ -288,17 +289,26 @@ async function doLogout() {
 }
 
 /* ── 数据 ── */
+let META = {agent_version: ""};
 async function load() {
-  const [r1, r2] = await Promise.all([API("/api/nodes"), API("/api/admin/groups")]);
+  const [r1, r2, r3] = await Promise.all([API("/api/nodes"), API("/api/admin/groups"), API("/api/admin/meta")]);
   if (r1.status === 401) { $("main").hidden = true; $("login").hidden = false; return; }
   NODES = ((await r1.json()).nodes || []);
   GROUPS = (await r2.json()).groups || [];
+  META = (await r3.json().catch(() => ({}))) || {agent_version: ""};
   renderRows();
 }
 function renderRows() {
   $("empty").hidden = NODES.length > 0;
   $("counts").textContent = NODES.length ? `共 ${NODES.length} 台` : "";
+  const outdated = META.agent_version ? NODES.filter(n => n.agent_ver !== META.agent_version) : [];
+  const upBtn = $("up_all");
+  upBtn.hidden = outdated.length === 0;
+  upBtn.textContent = `全部升级到 ${META.agent_version}（${outdated.length} 台）`;
+  upBtn.title = NODES.some(n => n.agent_ver !== META.agent_version && !n.can_self_upgrade)
+    ? "其中有 agent 低于 0.5.4 的节点不会响应指令，需要手动装一次" : "";
   $("rows").innerHTML = NODES.map(n => {
+    const needUp = !!META.agent_version && n.agent_ver !== META.agent_version && !n.target_ver;
     const gl = n.groups_list || [];
     const tags = (n.tags || []).map(t =>
       `<span class="tag" style="color:${safeColor(t.c)};border-color:${safeColor(t.c)}55;background:${safeColor(t.c)}1f">${esc(t.t)}</span>`).join("");
@@ -311,10 +321,14 @@ function renderRows() {
       <td data-k="标签"><div class="tags">${tags || '<span class="muted small">—</span>'}</div></td>
       <td data-k="状态"><span class="dot ${n.online ? "" : "off"}"></span>
         <span class="small">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span></td>
-      <td data-k="Agent" class="small muted">${esc(n.agent_ver || "—")}</td>
+      <td data-k="Agent" class="small ${needUp ? "" : "muted"}">${esc(n.agent_ver || "—")}
+        ${n.target_ver ? `<div class="tag" style="color:var(--warn);border-color:#fbbf2455;background:#fbbf241f;margin-top:2px">升级中 → ${esc(n.target_ver)}</div>`
+          : needUp ? `<div class="muted" style="font-size:11.5px">可升到 ${esc(META.agent_version)}</div>` : ""}</td>
       <td data-k="到期/配额" class="small">${esc(exp)}<div class="muted">${quota}</div></td>
       <td data-k="操作"><div class="ops">
         <button onclick="openEdit('${n.id}')">编辑</button>
+        ${needUp && n.can_self_upgrade ? `<button class="primary" onclick="upgrade('${n.id}')">升级</button>` : ""}
+        ${needUp && !n.can_self_upgrade ? `<button disabled title="这台的 agent 太旧（0.5.4 之前），不认升级指令，需要手动装一次">需手动升级</button>` : ""}
         <button onclick="rotate('${n.id}')">重发令牌</button>
         <button class="danger" onclick="delNode('${n.id}')">删除</button>
       </div></td>
@@ -467,6 +481,26 @@ async function delNode(id) {
   const r = await API("/api/nodes/" + id, {method: "DELETE"});
   if (!r.ok) { alert("删除失败"); return; }
   load();
+}
+
+/* ── Agent 升级 ── */
+async function upgrade(id) {
+  const n = NODES.find(x => x.id === id) || {};
+  const r = await API(`/api/nodes/${id}/upgrade`, {method: "POST"});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "下发失败"); return; }
+  await load();
+  alert(`已通知「${n.alias || id}」升级到 ${d.target}。\n\nagent 下一轮上报（默认 1 分钟内）会自己下载、校验、替换并重启，刷新看 Agent 版本变了就是成功。`);
+}
+async function upgradeAll() {
+  const outdated = META.agent_version ? NODES.filter(n => n.agent_ver !== META.agent_version && !n.target_ver) : [];
+  if (!outdated.length) return;
+  if (!confirm(`把这 ${outdated.length} 台升级到 agent ${META.agent_version}？\n\n离线的节点会在下次上报时升级。`)) return;
+  const r = await API("/api/admin/upgrade", {method: "POST", body: JSON.stringify({all: true})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "下发失败"); return; }
+  await load();
+  alert(`已排队 ${d.queued.length} 台，目标版本 ${d.target}。`);
 }
 
 /* ── 改密码 ── */

@@ -503,6 +503,64 @@ class TestHTTP(unittest.TestCase):
         self.assertEqual(code, 400)
         self.srv.config.pop("admin_password", None)
 
+    def test_agent_upgrade_flow(self):
+        """下发升级 → 上报应答带指令 → 升到位后中心自动清标记"""
+        code, body = self._post("/api/nodes", {"alias": "升级机"}, token="admin-test")
+        nid, tok = json.loads(body)["id"], json.loads(body)["token"]
+        meta_ver, meta_sha = P.agent_file_meta()
+        self.assertTrue(meta_ver, "中心目录里应有 agent.py")
+        # 老 agent 上报一次
+        self._post("/api/report", {"agent": "0.0.1", "ts": int(time.time())}, token=tok, csrf=False)
+        code, body = self._post(f"/api/nodes/{nid}/upgrade", {}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        self.assertEqual(json.loads(body)["target"], meta_ver)
+        # 下一次上报应带升级指令
+        code, body = self._post("/api/report", {"agent": "0.0.1", "ts": int(time.time())}, token=tok, csrf=False)
+        up = json.loads(body).get("upgrade") or {}
+        self.assertEqual(up.get("version"), meta_ver)
+        self.assertEqual(up.get("sha256"), meta_sha)
+        self.assertTrue(up.get("url", "").endswith("/agent.py"))
+        # 升到目标版本后再上报：不再下发，且标记被清掉
+        code, body = self._post("/api/report", {"agent": meta_ver, "ts": int(time.time())}, token=tok, csrf=False)
+        self.assertNotIn("upgrade", json.loads(body))
+        self.assertEqual((self.st.node(nid) or {}).get("target_ver"), "")
+        # 已经是最新时拒绝重复下发
+        code, body = self._post(f"/api/nodes/{nid}/upgrade", {}, token="admin-test")
+        self.assertEqual(code, 400)
+
+    def test_agent_upgrade_batch(self):
+        ids = []
+        for i in range(2):
+            code, body = self._post("/api/nodes", {"alias": f"批量{i}"}, token="admin-test")
+            ids.append(json.loads(body)["id"])
+        code, body = self._post("/api/admin/upgrade", {"all": True}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        queued = json.loads(body)["queued"]
+        self.assertTrue(set(queued) >= {"批量0", "批量1"})
+
+    def test_provision_token_and_api(self):
+        """供应令牌：只能建节点，建完返回可直接执行的安装命令"""
+        pid, tok = self.st.add_ptoken("fwpanel2")
+        self.assertTrue(tok.startswith("pv_"))
+        # 无效令牌
+        code, body = self._post("/api/provision/node", {"alias": "x"}, token="pv_bad", csrf=False)
+        self.assertEqual(code, 401)
+        # 正常建节点
+        code, body = self._post("/api/provision/node",
+                                {"alias": "面板建的", "groups": ["HK"], "tags": [{"t": "免费", "c": "#34d399"}]},
+                                token=tok, csrf=False)
+        self.assertEqual(code, 200, body)
+        d = json.loads(body)
+        self.assertTrue(d["command"].startswith("curl -fsSL "))
+        self.assertIn(d["token"], d["command"])
+        node = self.st.node(d["id"])
+        self.assertEqual(P.parse_groups(node["groups"]), ["HK"])
+        self.assertIn("fwpanel2", node["note"])
+        # 列 / 删
+        self.assertEqual(len(self.st.list_ptokens()), 1)
+        self.assertTrue(self.st.del_ptoken(pid))
+        self.assertIsNone(self.st.find_ptoken(tok))
+
     def test_token_rotate(self):
         """重发令牌：旧 token 立刻失效，新 token 能上报"""
         code, body = self._post("/api/nodes", {"alias": "轮换机"}, token="admin-test")

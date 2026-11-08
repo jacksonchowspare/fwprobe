@@ -26,21 +26,25 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import random
 import select
+import shutil
 import socket
+import subprocess
 import struct
 import sys
 import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.3"
+VERSION = "0.5.5"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
+UPGRADE_TIMEOUT = 60
 REPORT_TIMEOUT = 15
 
 DEFAULT_TARGETS = [
@@ -564,6 +568,78 @@ def spool_flush(cfg):
     return sent
 
 
+# --------------------------------------------------------------------------- 自升级
+UPGRADE_TRIED = set()          # 同一个版本只试一次，失败别每轮重试把日志刷爆
+
+
+def _parse_ver(v):
+    try:
+        return tuple(int(x) for x in str(v).strip().split("."))
+    except ValueError:
+        return (0,)
+
+
+def perform_upgrade(cfg, spec):
+    """中心下发升级指令后：下载 → 校验 sha256/版本号/语法 → 备份 → 替换 → 延时重启自己"""
+    ver = str(spec.get("version") or "").strip()
+    url = str(spec.get("url") or "").strip()
+    want = str(spec.get("sha256") or "").strip().lower()
+    if not ver or not url or ver == VERSION or ver in UPGRADE_TRIED:
+        return False
+    if not (url.startswith("https://") or url.startswith("http://127.0.0.1")):
+        print(f"[upgrade] 拒绝非 https 地址：{url}", file=sys.stderr, flush=True)
+        return False
+    UPGRADE_TRIED.add(ver)
+    target = os.path.abspath(__file__)
+    tmp = target + ".new"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": f"iProbe-agent/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=UPGRADE_TIMEOUT) as resp:
+            blob = resp.read()
+        if want and hashlib.sha256(blob).hexdigest() != want:
+            raise ValueError("sha256 校验不通过")
+        text = blob.decode("utf-8")
+        if f'VERSION = "{ver}"' not in text:
+            raise ValueError(f"下载到的文件不是 {ver} 版本")
+        with open(tmp, "wb") as fh:
+            fh.write(blob)
+        os.chmod(tmp, 0o755)
+        compile(text, tmp, "exec")                 # 语法不过就不换，免得把服务弄挂
+        bak = f"{target}.bak-{int(time.time())}"
+        try:
+            shutil.copy2(target, bak)
+        except OSError:
+            bak = ""
+        os.replace(tmp, target)
+        print(f"[upgrade] 已更新到 {ver}（备份：{bak or '无'}），即将重启服务", flush=True)
+    except Exception as exc:
+        print(f"[upgrade] 升级到 {ver} 失败：{exc}", file=sys.stderr, flush=True)
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+    unit = str(cfg.get("service") or "fwprobe-agent")
+    try:                                            # 脱离父进程，2 秒后重启（避开本轮上报收尾）
+        subprocess.Popen(["/bin/sh", "-c", f"sleep 2; /bin/systemctl restart {unit}"],
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        print(f"[upgrade] 重启失败，请手动 systemctl restart {unit}：{exc}", file=sys.stderr, flush=True)
+    return True
+
+
+def handle_report_response(cfg, body):
+    """上报应答里可能带升级指令"""
+    try:
+        data = json.loads(body or "{}")
+    except ValueError:
+        return
+    if isinstance(data, dict) and isinstance(data.get("upgrade"), dict):
+        perform_upgrade(cfg, data["upgrade"])
+
+
 # --------------------------------------------------------------------------- 主循环
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="agent.py", description=f"iProbe agent {VERSION}")
@@ -585,7 +661,9 @@ def main(argv=None):
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
         try:
-            print(post_report(cfg, payload))
+            body = post_report(cfg, payload)
+            print(body)
+            handle_report_response(cfg, body)
         except Exception as exc:
             print(f"上报失败: {exc}", file=sys.stderr)
             spool_save(payload)
@@ -599,7 +677,8 @@ def main(argv=None):
         try:
             payload = sampler.sample()
             try:
-                post_report(cfg, payload)
+                body = post_report(cfg, payload)
+                handle_report_response(cfg, body)
                 spool_flush(cfg)
             except Exception as exc:
                 print(f"[warn] 上报失败（已入本地缓存）: {exc}", file=sys.stderr)
