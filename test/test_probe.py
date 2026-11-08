@@ -5,6 +5,7 @@
 agent 的 /proc 解析 / TCPing 真实握手 / 配额解析。
 """
 import json
+import pathlib
 import os
 import socket
 import sys
@@ -203,6 +204,34 @@ class TestStore(unittest.TestCase):
         before = self.st.node(nid)["last_seen"]
         self.st.ingest(node, payload(), "1.1.1.1")
         self.assertNotEqual(before, None)
+
+
+class TestStaticPage(unittest.TestCase):
+    """静态页结构自检 —— 曾经因为脚本编辑把 CSS 甩到 <html> 前面，页面顶部直接显示一串 CSS 源码。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = pathlib.Path(P.__file__).with_name("static").joinpath("index.html").read_text("utf-8")
+
+    def test_doctype_first(self):
+        self.assertTrue(self.src.lstrip().startswith("<!DOCTYPE html>"),
+                        "index.html 必须以 DOCTYPE 开头，前面不能有任何文本")
+
+    def test_single_style_block(self):
+        self.assertEqual(self.src.count("<style"), 1)
+        self.assertEqual(self.src.count("</style>"), 1)
+
+    def test_no_css_outside_style(self):
+        head = self.src[:self.src.index("<body")]
+        before_style = head[:head.index("<style")]
+        self.assertNotIn("{", before_style, "<style> 之前出现了 CSS 文本")
+        after_style = head[head.index("</style>"):]
+        self.assertNotIn("keyframes", after_style)
+
+    def test_strip_styles_present(self):
+        self.assertIn(".strip{display:block", self.src)
+        self.assertIn(".strip rect.live", self.src)
+        self.assertNotIn(".cells{display:flex", self.src)   # 旧的 flex 格子实现已废弃
 
 
 class TestHTTP(unittest.TestCase):
