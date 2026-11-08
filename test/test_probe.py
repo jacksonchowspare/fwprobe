@@ -146,6 +146,25 @@ class TestStore(unittest.TestCase):
         self.assertIn("sample", n)
         self.assertTrue(n["online"])
 
+    def test_check_hist(self):
+        """卡片 20 格滚动条：每条线路按时间旧→新返回，最多 20 条"""
+        nid, _ = self.st.add_node("a")
+        node = self.st.node(nid)
+        now = int(time.time())
+        for i in range(25):
+            # 注意：中心会把偏离本机时间 >600s 的 ts 拉回 now（防伪造/防乱序），
+            # 所以测试数据要落在 10 分钟内，否则会被合并
+            p = payload(); p["ts"] = now - (25 - i) * 20
+            p["checks"][0]["avg"] = 50 + i      # 上报字段是 min/avg/max（入库变 rmin/ravg）
+            p["checks"][0]["min"] = 40 + i
+            self.st.ingest(node, p, "1.1.1.1")
+        h = self.st.check_hist(nid, 20)
+        ct = h["上海电信"]
+        self.assertEqual(len(ct), 20)
+        self.assertEqual(ct[0]["min"], 45.0)      # i=5 起（最新 20 条里最早那条）
+        self.assertEqual(ct[-1]["min"], 64.0)
+        self.assertTrue(all(ct[i]["ts"] <= ct[i + 1]["ts"] for i in range(len(ct) - 1)))
+
     def test_spark_series(self):
         nid, _ = self.st.add_node("a")
         node = self.st.node(nid)

@@ -37,7 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.2.0"
+VERSION = "0.2.2"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
@@ -55,7 +55,7 @@ DEFAULT_TARGETS = [
 
 # --------------------------------------------------------------------------- 配置
 def load_config(path=CONFIG_PATH):
-    cfg = {"server": "", "token": "", "interval": 30, "check_interval": 60,
+    cfg = {"server": "", "token": "", "interval": 30, "check_interval": 30,
            "disk_mount": "/", "targets": DEFAULT_TARGETS, "name": ""}
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -407,8 +407,8 @@ class Sampler:
             "procs": proc_count(),
             "checks": [],
         }
-        # 探测按 check_interval 走（默认 60s），避免每 30s 打一次三网测试 IP
-        ci = float(self.cfg.get("check_interval") or 60)
+        # 探测按 check_interval 走（默认 30s；卡片 20 格 = 10 分钟，每分钟走 2 格）
+        ci = float(self.cfg.get("check_interval") or 30)
         if self.last_checks is None or (now - self.last_checks_ts) >= ci:
             self.last_checks = run_checks(self.cfg.get("targets"))
             self.last_checks_ts = now

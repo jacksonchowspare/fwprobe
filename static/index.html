@@ -30,6 +30,10 @@
   header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
   h1{font-size:19px;margin:0;letter-spacing:.3px}
   .ver{color:var(--muted);font-size:12px}
+  #refreshed{display:inline-flex;align-items:center;gap:5px}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(52,211,153,.7);
+    animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.55)}70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
   .top-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   button{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
     border-radius:8px;padding:6px 11px;cursor:pointer;transition:background .16s,border-color .16s}
@@ -75,15 +79,15 @@
   .kvline{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-top:11px}
   .kvline b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
   .lat{margin-top:11px;border-top:1px dashed var(--border);padding-top:9px;display:flex;flex-direction:column;gap:6px}
-  .lat .r{display:grid;grid-template-columns:44px 104px 56px 1fr;align-items:center;gap:8px;font-size:12px}
+  .lat .r{display:grid;grid-template-columns:42px minmax(0,1fr) 52px 88px;align-items:center;gap:8px;font-size:12px}
   .lat .name{color:var(--muted);white-space:nowrap}
   .lat .ms{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
   .lat .ms.ok{color:var(--ok)} .lat .ms.warn{color:var(--warn)} .lat .ms.bad{color:var(--bad)}
-  .cells{display:flex;gap:2px;align-items:center;height:8px}
-  .cells i{flex:1;height:100%;min-width:2px;border-radius:1.5px;background:var(--track)}
-  .lat .cells{width:104px;flex:none}
-  .lat .right{display:flex;align-items:center;gap:6px;justify-content:flex-end}
-  .lat .right .cells{width:24px;flex:none}
+  .cells{display:flex;gap:1px;align-items:center;height:9px;min-width:0}
+  .cells i{flex:1 1 0;height:100%;min-width:1px;border-radius:1px;background:var(--track)}
+  .lat .cells{flex:1 1 auto}
+  .lat .right{display:flex;align-items:center;gap:5px;justify-content:flex-end}
+  .lat .right .cells{width:52px;flex:none;gap:1px}
   .lat .loss{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11.5px;width:32px;text-align:right}
   .foot{display:flex;align-items:center;gap:14px;margin-top:11px;border-top:1px dashed var(--border);
     padding-top:9px;font-size:12px;color:var(--muted)}
@@ -117,8 +121,7 @@
     .grid{grid-template-columns:1fr}
     .charts{grid-template-columns:1fr}
     body{padding:16px 12px 50px}
-    .lat .r{grid-template-columns:40px 92px 52px 1fr}
-    .lat .cells{width:92px}
+    .lat .r{grid-template-columns:38px minmax(0,1fr) 48px 84px}
   }
 </style>
 </head>
@@ -128,6 +131,7 @@
     <h1>fwprobe · 节点状态</h1>
     <span class="ver" id="ver"></span>
     <div class="top-actions">
+      <span class="ver" id="refreshed"><i class="dot"></i><span>加载中</span></span>
       <span class="ver" id="meta"></span>
       <button id="theme_btn" onclick="toggleTheme()">白天模式</button>
     </div>
@@ -238,31 +242,40 @@ function spark(data, color) {
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1" opacity=".45"/>${dots}</svg>`;
 }
-const LAT_COLOR = ms => ms == null ? "var(--muted)" : (ms < 100 ? "var(--ok)" : (ms <= 200 ? "var(--warn)" : "var(--bad)"));
-const LAT_CLASS = ms => ms == null ? "" : (ms < 100 ? "ok" : (ms <= 200 ? "warn" : "bad"));
+/* 延迟分档：1-99 绿 / 100-199 黄 / ≥200 红 / 超时灰 */
+const LAT_COLOR = ms => ms == null ? "var(--muted)" : (ms < 100 ? "var(--ok)" : (ms < 200 ? "var(--warn)" : "var(--bad)"));
+const LAT_CLASS = ms => ms == null ? "" : (ms < 100 ? "ok" : (ms < 200 ? "warn" : "bad"));
+/* 丢包分档：0 绿 / 1-9 黄 / ≥10 红 / 超时灰 */
+const LOSS_COLOR = (loss, ok) => !ok ? "var(--muted)"
+  : (loss <= 0 ? "var(--ok)" : (loss < 10 ? "var(--warn)" : "var(--bad)"));
 
-/* 一格一格的格子条：filled 个格子按颜色点亮，其余留底色 */
-function cells(filled, color, n) {
-  n = n || 12;
-  const f = Math.max(0, Math.min(n, Math.round(filled)));
+const CELLS = 20;   // 20 格 = 最近 20 次探测（30s 一次 → 约 10 分钟，每分钟走 2 格）
+
+/* 滚动历史条：旧的在左、最新在右（新数据从右边进来，整体往左推） */
+function strip(hist, kind, n) {
+  n = n || CELLS;
+  const arr = (hist || []).slice(-n);
+  const pad = Math.max(0, n - arr.length);
   let out = '<span class="cells">';
-  for (let i = 0; i < n; i++) out += `<i${i < f ? ` style="background:${color}"` : ""}></i>`;
+  for (let i = 0; i < pad; i++) out += "<i></i>";
+  arr.forEach(h => {
+    const hm = new Date((h.ts || 0) * 1000);
+    const hhmm = String(hm.getHours()).padStart(2, "0") + ":" + String(hm.getMinutes()).padStart(2, "0");
+    let color, tip;
+    if (kind === "lat") {
+      const ms = h.ok ? (h.min != null ? h.min : h.avg) : null;
+      color = ms == null ? "var(--muted)" : LAT_COLOR(ms);
+      tip = ms == null ? `${hhmm} 超时` : `${hhmm} ${Math.round(ms)} ms`;
+    } else {
+      color = LOSS_COLOR(h.loss || 0, h.ok);
+      tip = h.ok ? `${hhmm} 丢包 ${(h.loss || 0).toFixed(0)}%` : `${hhmm} 超时`;
+    }
+    out += `<i title="${tip}" style="background:${color}"></i>`;
+  });
   return out + "</span>";
 }
-/* 延迟格子：0-300ms 映射到 1-12 格（超时 0 格） */
-function latCells(ms) {
-  if (ms == null) return cells(0, LAT_COLOR(null));
-  const f = Math.max(1, Math.min(12, Math.round(ms / 300 * 12)));
-  return cells(f, LAT_COLOR(ms));
-}
-/* 丢包格子：不丢包全绿；有丢包按丢包率点亮红格（至少 1 格） */
-function lossCells(loss) {
-  if (!loss) return cells(3, "var(--ok)", 3);
-  const f = Math.max(1, Math.min(3, Math.round(loss / 100 * 3) || 1));
-  return cells(f, "var(--bad)", 3);
-}
 
-let NODES = [], OFFLINE_AFTER = 120;
+let NODES = [], OFFLINE_AFTER = 120, LAST_OK = 0;
 
 function card(n) {
   const s = n.sample || {};
@@ -275,11 +288,12 @@ function card(n) {
   const lat = (n.checks || []).map(c => {
     const ms = c.ok ? (c.rmin != null ? c.rmin : c.ravg) : null;
     const loss = c.loss || 0;
+    const h = (n.hist || {})[c.name] || [];
     return `<div class="r">
       <span class="name">${String(c.name).replace("上海", "")}</span>
-      ${latCells(ms)}
+      ${strip(h, "lat")}
       <span class="ms ${LAT_CLASS(ms)}">${ms == null ? "超时" : Math.round(ms) + " ms"}</span>
-      <span class="right">${lossCells(loss)}<span class="loss">${loss.toFixed(1)}%</span></span>
+      <span class="right">${strip(h, "loss")}<span class="loss">${loss.toFixed(0)}%</span></span>
     </div>`;
   }).join("");
   return `<div class="card" onclick="openDetail('${n.id}')">
@@ -353,6 +367,7 @@ async function loadSummary() {
     OFFLINE_AFTER = d.offline_after || 120;
     $("ver").textContent = "v" + (d.version || "");
     $("oa").textContent = OFFLINE_AFTER;
+    LAST_OK = Date.now();
     renderSummary();
   } catch (e) {
     $("nodes").innerHTML = `<div class="empty">加载失败：${e.message}</div>`;
@@ -530,6 +545,18 @@ function toggleTheme() {
   setTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
   if (CUR && location.hash) loadDetail();
 }
+
+setInterval(() => {
+  const el = $("refreshed");
+  if (!el) return;
+  const sec = LAST_OK ? Math.round((Date.now() - LAST_OK) / 1000) : null;
+  el.querySelector("span").textContent = sec == null ? "连接中" : (sec <= 2 ? "刚刚更新" : "更新于 " + sec + " 秒前");
+  el.querySelector("i").style.background = sec == null || sec > 45 ? "var(--bad)" : "var(--ok)";
+}, 1000);
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { loadSummary(); if (location.hash) loadDetail(); }
+});
 
 setTheme(localStorage.getItem("fwprobe_theme") || "dark");
 window.addEventListener("hashchange", route);

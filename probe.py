@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.2.0"
+VERSION = "0.2.2"
 APP_NAME = "fwprobe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -316,6 +316,19 @@ class Store:
         tx = max(0, (last["tx_total"] or 0) - (first["tx_total"] or 0))
         return rx, tx
 
+    def check_hist(self, nid, n=20):
+        """每条探测线路最近 n 次的原始结果（旧→新），供卡片 20 格滚动历史条。"""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT ts,name,ok,loss,rmin,ravg FROM checks WHERE node_id=? ORDER BY ts DESC LIMIT ?",
+                (nid, n * 8)).fetchall()
+        out = {}
+        for r in reversed(rows):
+            out.setdefault(r["name"], []).append({
+                "ts": r["ts"], "ok": r["ok"], "loss": r["loss"],
+                "min": r["rmin"], "avg": r["ravg"]})
+        return {k: v[-n:] for k, v in out.items()}
+
     def spark(self, nid, n=24):
         """最近 n 个采样点的上/下行速率（卡片点线走势用，省一次请求）"""
         with self.lock:
@@ -452,6 +465,7 @@ def public_summary(store: Store):
             "used_bytes": rx + tx,
             "rx_total": rx, "tx_total": tx,
             "spark": store.spark(n["id"], 24),
+            "hist": store.check_hist(n["id"], 20),
             "sample": s, "checks": checks,
         })
     return {"version": VERSION, "now": now, "offline_after": OFFLINE_AFTER, "nodes": out}
