@@ -143,6 +143,11 @@
   .chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
   .chart .t{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between}
   .chart canvas{width:100%;height:110px;display:block}
+  /* 4K（含 125% 缩放的 3072）单独上 5 张；2560 及以下仍 4 张 */
+  @media (min-width:3000px){
+    .wrap{max-width:2364px}
+    .grid{grid-template-columns:repeat(5,minmax(0,1fr))}
+  }
   @media (max-width:1300px){
     .grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
