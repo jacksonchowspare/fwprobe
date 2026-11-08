@@ -26,7 +26,7 @@
       radial-gradient(700px 420px at 100% 0%, rgba(34,197,94,.10), transparent 55%), var(--bg);
     background-attachment:fixed;overflow-x:hidden;
   }
-  .wrap{max-width:1280px;margin:0 auto}
+  .wrap{max-width:2000px;margin:0 auto}
   header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
   h1{font-size:19px;margin:0;letter-spacing:.3px}
   .ver{color:var(--muted);font-size:12px}
@@ -45,7 +45,8 @@
   button{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
     border-radius:8px;padding:6px 11px;cursor:pointer;transition:background .16s,border-color .16s}
   button:hover{background:rgba(77,163,255,.14);border-color:rgba(77,163,255,.45)}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(390px,1fr));gap:16px}
+  /* 1080p / 1440p / 4K 都是 4 列（内容区上限 2000px）；1300px 以下 2 列；860px 以下 1 列（手机） */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:16px}
   .card{
     background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px 14px;
     backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:var(--shadow);
@@ -142,6 +143,9 @@
   .chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
   .chart .t{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between}
   .chart canvas{width:100%;height:110px;display:block}
+  @media (max-width:1300px){
+    .grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
   @media (max-width:860px){
     .grid{grid-template-columns:1fr}
     .charts{grid-template-columns:1fr}
