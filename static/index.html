@@ -79,15 +79,26 @@
   .kvline{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-top:11px}
   .kvline b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
   .lat{margin-top:11px;border-top:1px dashed var(--border);padding-top:9px;display:flex;flex-direction:column;gap:6px}
-  .lat .r{display:grid;grid-template-columns:42px minmax(0,1fr) 52px 88px;align-items:center;gap:8px;font-size:12px}
-  .lat .name{color:var(--muted);white-space:nowrap}
+  .lat-cap{font-size:10.5px;color:var(--muted);opacity:.85;letter-spacing:.2px;margin-bottom:2px}
+  .lat .r{display:grid;grid-template-columns:auto minmax(0,1fr) 48px minmax(0,1fr) 34px;
+    align-items:center;gap:7px;font-size:12px}
+  .lat .name{color:var(--muted);white-space:nowrap;font-size:11.5px}
   .lat .ms{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  .lat .loss{text-align:right;white-space:nowrap}
   .lat .ms.ok{color:var(--ok)} .lat .ms.warn{color:var(--warn)} .lat .ms.bad{color:var(--bad)}
-  .cells{display:flex;gap:1px;align-items:center;height:9px;min-width:0}
-  .cells i{flex:1 1 0;height:100%;min-width:1px;border-radius:1px;background:var(--track)}
-  .lat .cells{flex:1 1 auto}
-  .lat .right{display:flex;align-items:center;gap:5px;justify-content:flex-end}
-  .lat .right .cells{width:52px;flex:none;gap:1px}
+  .cells{display:flex;gap:1px;align-items:stretch;height:12px;min-width:0}
+  .cells i{flex:1 1 0;min-width:1px;border-radius:1.5px;background:var(--track)}
+  /* 最新一格（最右）做「正在监测」的呼吸动画；往左移后就是固定色 */
+  /* 最右一格「正在监测」：整格始终实心，只做亮度/发光呼吸，不会看成缺口 */
+  .cells i.live{
+    animation:cellIn .45s ease-out, liveGlow 1.8s ease-in-out infinite .45s;
+    position:relative;z-index:1;
+  }
+  @keyframes cellIn{ from{transform:scaleX(.15);opacity:.25} to{transform:scaleX(1);opacity:1} }
+  @keyframes liveGlow{
+    0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}
+    50%{box-shadow:0 0 7px 2px rgba(255,255,255,.6)}
+  }
   .lat .loss{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11.5px;width:32px;text-align:right}
   .foot{display:flex;align-items:center;gap:14px;margin-top:11px;border-top:1px dashed var(--border);
     padding-top:9px;font-size:12px;color:var(--muted)}
@@ -121,7 +132,7 @@
     .grid{grid-template-columns:1fr}
     .charts{grid-template-columns:1fr}
     body{padding:16px 12px 50px}
-    .lat .r{grid-template-columns:38px minmax(0,1fr) 48px 84px}
+    .lat .r{grid-template-columns:auto minmax(0,1fr) 42px minmax(0,1fr) 28px;gap:6px}
   }
 </style>
 </head>
@@ -270,7 +281,8 @@ function strip(hist, kind, n) {
       color = LOSS_COLOR(h.loss || 0, h.ok);
       tip = h.ok ? `${hhmm} 丢包 ${(h.loss || 0).toFixed(0)}%` : `${hhmm} 超时`;
     }
-    out += `<i title="${tip}" style="background:${color}"></i>`;
+    const isLast = h === arr[arr.length - 1];
+    out += `<i${isLast ? ' class="live"' : ""} title="${tip}" style="background:${color}"></i>`;
   });
   return out + "</span>";
 }
@@ -290,10 +302,11 @@ function card(n) {
     const loss = c.loss || 0;
     const h = (n.hist || {})[c.name] || [];
     return `<div class="r">
-      <span class="name">${String(c.name).replace("上海", "")}</span>
+      <span class="name">${c.name}</span>
       ${strip(h, "lat")}
       <span class="ms ${LAT_CLASS(ms)}">${ms == null ? "超时" : Math.round(ms) + " ms"}</span>
-      <span class="right">${strip(h, "loss")}<span class="loss">${loss.toFixed(0)}%</span></span>
+      ${strip(h, "loss")}
+      <span class="loss">${loss.toFixed(0)}%</span>
     </div>`;
   }).join("");
   return `<div class="card" onclick="openDetail('${n.id}')">
@@ -343,7 +356,10 @@ function card(n) {
     </div>
     <div class="kvline"><span>TCP 连接 <b>${s.tcp == null ? "-" : s.tcp}</b></span>
       <span>UDP 连接 <b>${s.udp == null ? "-" : s.udp}</b></span></div>
-    <div class="lat">${lat || '<div class="r"><span class="name">探测</span><span class="track"></span><span class="ms">-</span><span class="loss">-</span></div>'}</div>
+    <div class="lat">
+      <div class="lat-cap">三网延迟 · 最近 20 次探测（每格 1 分钟）</div>
+      ${lat || '<div class="r"><span class="name">探测</span><span class="cells"></span><span class="ms">-</span><span class="cells"></span><span class="loss">-</span></div>'}
+    </div>
     <div class="foot">
       <span>在线 <b>${n.online ? fmtDur(s.uptime) : "-"}</b></span>
       <span>到期 <b>${n.expires_at || "—"}</b></span>
@@ -561,7 +577,7 @@ document.addEventListener("visibilitychange", () => {
 setTheme(localStorage.getItem("fwprobe_theme") || "dark");
 window.addEventListener("hashchange", route);
 loadSummary().then(route);
-setInterval(() => { loadSummary(); if (location.hash) loadDetail(); }, 10000);
+setInterval(() => { loadSummary(); if (location.hash) loadDetail(); }, 30000);
 </script>
 </body>
 </html>
