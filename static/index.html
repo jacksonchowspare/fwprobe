@@ -148,6 +148,15 @@
   .chart canvas{width:100%;height:130px;display:block}
   #ranges button.active{color:var(--text);border-color:rgba(77,163,255,.55);background:rgba(77,163,255,.16)}
   /* 系统信息：中间分开，左右各一半；按列填充（左边 6 项，右边 6 项） */
+  /* 三网图例：点亮的显示、灰掉的不显示（默认全亮） */
+  .legend{display:flex;gap:6px;flex-wrap:wrap;margin:2px 0 4px}
+  .legend button{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;
+    font-size:11.5px;line-height:1.5;cursor:pointer;border:1px solid var(--border);
+    background:var(--hover);color:var(--text);transition:opacity .14s,background .14s,border-color .14s}
+  .legend button:hover{border-color:rgba(77,163,255,.45)}
+  .legend button .d{width:7px;height:7px;border-radius:50%;flex:none}
+  .legend button.off{color:var(--muted);background:transparent;border-color:var(--border);opacity:.55}
+  .legend button.off .d{background:var(--muted) !important}
   .sysgrid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:repeat(6,auto);
     grid-auto-flow:column;column-gap:28px;row-gap:2px}
   .sysgrid .kv{display:flex;align-items:baseline;gap:10px;padding:5px 0;border-bottom:1px dashed var(--border);min-width:0}
@@ -203,7 +212,9 @@
       <div class="chart"><div class="t"><span>CPU 使用率</span><span id="c_cpu"></span></div><canvas id="ch_cpu"></canvas></div>
       <div class="chart"><div class="t"><span>内存占用</span><span id="c_mem"></span></div><canvas id="ch_mem"></canvas></div>
       <div class="chart"><div class="t"><span>网络（上行 / 下行）</span><span id="c_net"></span></div><canvas id="ch_net"></canvas></div>
-      <div class="chart"><div class="t"><span>三网时延</span><span id="c_lat"></span></div><canvas id="ch_lat"></canvas></div>
+      <div class="chart"><div class="t"><span>三网时延</span><span id="c_lat"></span></div>
+        <div class="legend" id="lat_legend"></div>
+        <canvas id="ch_lat"></canvas></div>
     </div>
     <div class="chart" style="margin-top:14px">
       <div class="t"><span>系统信息</span></div>
@@ -656,7 +667,7 @@ function drawChart(canvasId, groups, opts) {
   }
 
   const live = (groups || []).filter(g => (g.points || []).some(p => p.v != null));
-  const multi = live.length > 1 || opts.legend;
+  const multi = opts.legend === false ? false : (live.length > 1 || opts.legend);
   const L = 44, R = 10, T = multi ? 20 : 10, B = 18;
   const pw = Math.max(10, w - L - R), ph = Math.max(10, h - T - B);
 
@@ -727,6 +738,45 @@ function drawChart(canvasId, groups, opts) {
   }
 }
 
+/* ───── 三网曲线：点亮=显示，灰色=隐藏；默认全亮 ─────
+   第一次点击等于「只看这一条」，之后每次点击是切换；全亮回默认，永远不会全灭。 */
+let LAT_SERIES = [];              // [{name, color, points}]
+let LAT_HIDDEN = new Set();       // 空集合 = 全部显示
+
+function carrierColor(name) {
+  if (/电信|telecom|ctcc|cn2/i.test(name)) return "#34d399";   // 绿
+  if (/移动|mobile|cmcc|cmin2/i.test(name)) return "#fbbf24";  // 黄
+  if (/联通|unicom|cucc/i.test(name)) return "#4da3ff";        // 蓝
+  const pal = ["#a78bfa", "#f472b6", "#22d3ee", "#fb923c"];
+  return pal[Math.abs(name.length) % pal.length];
+}
+
+function toggleLat(name) {
+  if (LAT_HIDDEN.size === 0) {
+    // 从「全亮」状态点某一条 → 只看它
+    LAT_SERIES.forEach(x => { if (x.name !== name) LAT_HIDDEN.add(x.name); });
+  } else if (LAT_HIDDEN.has(name)) {
+    LAT_HIDDEN.delete(name);                       // 灰的点亮
+  } else {
+    LAT_HIDDEN.add(name);                          // 亮的变灰
+    if (LAT_HIDDEN.size >= LAT_SERIES.length) LAT_HIDDEN.clear();   // 全点亮 = 回默认
+  }
+  renderLat();
+}
+
+function renderLat() {
+  const box = $("lat_legend");
+  if (box) {
+    box.innerHTML = LAT_SERIES.map(x =>
+      `<button class="${LAT_HIDDEN.has(x.name) ? "off" : ""}" onclick="toggleLat('${esc(x.name).replace(/'/g, "\\'")}')"
+        title="${LAT_HIDDEN.has(x.name) ? "点击显示" : "点击只看这条"}">
+        <span class="d" style="background:${x.color}"></span>${esc(x.name)}</button>`).join("");
+  }
+  const shown = LAT_SERIES.filter(x => !LAT_HIDDEN.has(x.name));
+  drawChart("ch_lat", shown, { yfmt: v => Math.round(v) + "ms", p95: true, floor: 50,
+                               max: 1000, hours: rangeHours(), legend: false });
+}
+
 function monthDays() {
   const d = new Date();
   return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();   // 当月实际天数（28/29/30/31）
@@ -756,12 +806,16 @@ async function loadDetail() {
       { name: "下行", color: "#fbbf24", points: P.map(p => ({ ts: p.ts, v: p.rx })) }
     ], { yfmt: v => fmtSpeed(v), hours: HOURS });
     const checks = d.checks || {};
-    const LCOL = ["#34d399", "#4da3ff", "#fbbf24", "#a78bfa", "#f472b6"];
-    drawChart("ch_lat", Object.keys(checks).map((k, i) => ({
+    // 线路顺序固定为 电信→移动→联通，颜色按名称映射（绿/黄/蓝），不随对象键顺序变
+    const order = k => (/电信|telecom/i.test(k) ? 0 : (/移动|mobile/i.test(k) ? 1 : (/联通|unicom/i.test(k) ? 2 : 3)));
+    LAT_SERIES = Object.keys(checks).sort((a, b) => order(a) - order(b)).map(k => ({
       name: k,
-      color: LCOL[i % LCOL.length],
+      color: carrierColor(k),
       points: (checks[k] || []).map(x => ({ ts: x.ts, v: x.ok ? x.avg : null }))
-    })), { yfmt: v => Math.round(v) + "ms", p95: true, floor: 50, max: 1000, hours: HOURS });
+    }));
+    // 线路变化后清掉已不存在的隐藏项
+    [...LAT_HIDDEN].forEach(n => { if (!LAT_SERIES.some(x => x.name === n)) LAT_HIDDEN.delete(n); });
+    renderLat();
 
     const last = P[P.length - 1] || {};
     $("c_cpu").textContent = fmtPct(last.cpu);
