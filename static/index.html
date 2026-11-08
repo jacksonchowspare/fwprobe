@@ -296,7 +296,7 @@ function strip(hist, kind, n) {
 }
 
 let NODES = [], OFFLINE_AFTER = 120, LAST_OK = 0;
-const REFRESH_MS = 60000;          // 页面刷新周期（用户定：60 秒，与三网探测周期一致）
+const REFRESH_MS = 30000;          // 页面刷新 30s（资源每次采样都能看到）；三网格子由探测数据驱动，60s 才走一格
 let NEXT_AT = 0;                   // 下次刷新时刻（倒计时基准）
 
 function card(n) {
