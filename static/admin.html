@@ -171,6 +171,8 @@
       <div class="f"><label>配额（GB，留空=不限）</label><input id="ed_quota" type="number" min="0" step="1" placeholder="不限"></div>
       <div class="f"><label>到期日</label><input id="ed_expires" type="date"></div>
     </div>
+    <div class="f"><label>地区代码（两位，如 GB / HK / JP；留空 = 自动识别）</label>
+      <input id="ed_country" maxlength="2" placeholder="自动" style="text-transform:uppercase"></div>
     <div class="f"><label>备注（只在后台可见）</label><input id="ed_note" placeholder="可选"></div>
     <div class="dlgfoot">
       <button onclick="closeMask('m_edit')">取消</button>
@@ -354,6 +356,7 @@ function openAdd() {
   $("ed_expires").value = "";
   $("ed_note").value = "";
   $("ed_newgroup").value = "";
+  $("ed_country").value = "";
   TAGS = [];
   PICK = COLORS[0];
   renderGroupChips([]);
@@ -371,6 +374,7 @@ function openEdit(id) {
   $("ed_quota").value = n.quota_bytes ? Math.round(n.quota_bytes / 1024 / 1024 / 1024) || "" : "";
   $("ed_expires").value = n.expires_at || "";
   $("ed_note").value = n.note || "";
+  $("ed_country").value = n.country || "";
   $("ed_newgroup").value = "";
   TAGS = (n.tags || []).map(t => ({t: t.t, c: safeColor(t.c)}));
   PICK = COLORS[0];
@@ -437,7 +441,8 @@ async function saveNode() {
     tags: TAGS,
     quota_bytes: quotaGb > 0 ? Math.round(quotaGb * 1024 * 1024 * 1024) : 0,
     expires_at: $("ed_expires").value || "",
-    note: $("ed_note").value.trim()
+    note: $("ed_note").value.trim(),
+    country: ($("ed_country").value || "").trim().toUpperCase()
   };
   const r = EDITING
     ? await API("/api/nodes/" + EDITING, {method: "POST", body: JSON.stringify(body)})

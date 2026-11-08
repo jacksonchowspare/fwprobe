@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.6"
+VERSION = "0.5.7"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -770,21 +770,27 @@ def lookup_country(ip: str):
 
     内网/回环来源（agent 与中心同机、或同内网）拿不到真实出口 IP —— 这时查「本机自己的归属地」，
     对这两类场景正好是对的；真正的公网来源照常用它的 IP 查。
+
+    源顺序：ipinfo.io 优先（对机房 IP 更准），ip-api 兜底。
+    ⚠ 实测 ip-api 按 ASN 注册地判，会把「ASN 注册在香港、机器在英国」的机房判成 HK。
     """
     self_lookup = not ip or is_private_ip(ip)
     if not self_lookup and ip in COUNTRY_CACHE:
         return COUNTRY_CACHE[ip]
-    urls = (("http://ip-api.com/json/?fields=countryCode", "https://ipapi.co/country/")
-            if self_lookup else
-            (f"http://ip-api.com/json/{ip}?fields=countryCode", f"https://ipapi.co/{ip}/country/"))
+    if self_lookup:
+        urls = ("https://ipinfo.io/json", "http://ip-api.com/json/?fields=countryCode")
+    else:
+        urls = (f"https://ipinfo.io/{ip}/json",
+                f"http://ip-api.com/json/{ip}?fields=countryCode")
     for url in urls:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{VERSION}"})
-            with urllib.request.urlopen(req, timeout=4) as r:
-                body = r.read(64).decode("utf-8", "replace").strip()
+            with urllib.request.urlopen(req, timeout=5) as r:
+                body = r.read().decode("utf-8", "replace").strip()
             code = ""
             if body.startswith("{"):
-                code = (json.loads(body).get("countryCode") or "").upper()
+                obj = json.loads(body)
+                code = (obj.get("country") or obj.get("countryCode") or "").upper()
             else:
                 code = body[:2].upper()
             if len(code) == 2 and code.isalpha():
