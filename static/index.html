@@ -31,6 +31,8 @@
   h1{font-size:19px;margin:0;letter-spacing:.3px}
   .ver{color:var(--muted);font-size:12px}
   #refreshed{display:inline-flex;align-items:center;gap:5px}
+  #refreshed span{font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
+    display:inline-block;min-width:9.5ch;text-align:left}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(52,211,153,.7);
     animation:pulse 2s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.55)}70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
@@ -290,6 +292,8 @@ function strip(hist, kind, n) {
 }
 
 let NODES = [], OFFLINE_AFTER = 120, LAST_OK = 0;
+const REFRESH_MS = 30000;          // 页面刷新周期（用户定：30 秒）
+let NEXT_AT = 0;                   // 下次刷新时刻（倒计时基准）
 
 function card(n) {
   const s = n.sample || {};
@@ -386,6 +390,7 @@ async function loadSummary() {
     $("ver").textContent = "v" + (d.version || "");
     $("oa").textContent = OFFLINE_AFTER;
     LAST_OK = Date.now();
+    NEXT_AT = LAST_OK + REFRESH_MS;
     renderSummary();
   } catch (e) {
     $("nodes").innerHTML = `<div class="empty">加载失败：${e.message}</div>`;
@@ -567,9 +572,12 @@ function toggleTheme() {
 setInterval(() => {
   const el = $("refreshed");
   if (!el) return;
-  const sec = LAST_OK ? Math.round((Date.now() - LAST_OK) / 1000) : null;
-  el.querySelector("span").textContent = sec == null ? "连接中" : (sec <= 2 ? "刚刚更新" : "更新于 " + sec + " 秒前");
-  el.querySelector("i").style.background = sec == null || sec > 45 ? "var(--bad)" : "var(--ok)";
+  const txt = el.querySelector("span");
+  const dot = el.querySelector("i");
+  if (!NEXT_AT) { txt.textContent = "连接中"; dot.style.background = "var(--muted)"; return; }
+  const left = Math.max(0, Math.ceil((NEXT_AT - Date.now()) / 1000));
+  txt.textContent = "下次更新还剩 " + String(left).padStart(2, "0") + " 秒";
+  dot.style.background = left <= 5 ? "var(--accent)" : "var(--ok)";
 }, 1000);
 
 document.addEventListener("visibilitychange", () => {
@@ -579,7 +587,7 @@ document.addEventListener("visibilitychange", () => {
 setTheme(localStorage.getItem("fwprobe_theme") || "dark");
 window.addEventListener("hashchange", route);
 loadSummary().then(route);
-setInterval(() => { loadSummary(); if (location.hash) loadDetail(); }, 30000);
+setInterval(() => { loadSummary(); if (location.hash) loadDetail(); }, REFRESH_MS);
 </script>
 </body>
 </html>
