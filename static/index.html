@@ -36,8 +36,10 @@
   #refreshed{display:inline-flex;align-items:center;gap:5px}
   #refreshed span{font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
     display:inline-block;min-width:9.5ch;text-align:left}
+  .stat{display:inline-flex;align-items:center;gap:5px;font-variant-numeric:tabular-nums}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(52,211,153,.7);
-    animation:pulse 2s infinite}
+    animation:pulse 2s infinite;flex:none}
+  .dot.off{background:var(--bad);animation:none;box-shadow:none;opacity:.9}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.55)}70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
   .top-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   button{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
@@ -156,7 +158,8 @@
     <div class="top-actions">
       <span class="ver" id="totals" title="所有节点累计流量"></span>
       <span class="ver" id="refreshed"><i class="dot"></i><span>加载中</span></span>
-      <span class="ver" id="meta"></span>
+      <span class="ver stat" id="stat_on"><i class="dot"></i><span>--</span></span>
+      <span class="ver stat" id="stat_off"><i class="dot off"></i><span>--</span></span>
       <button id="theme_btn" onclick="toggleTheme()">白天模式</button>
     </div>
   </header>
@@ -472,6 +475,15 @@ function renderTotals(list) {
   const rtx = list.reduce((a, n) => a + ((n.sample || {}).tx_bps || 0), 0);
   const rrx = list.reduce((a, n) => a + ((n.sample || {}).rx_bps || 0), 0);
   const scope = (FILTER.region || FILTER.groups.size) ? `筛选内 ${list.length} 台` : `全部 ${list.length} 台`;
+  const on = list.filter(n => n.online).length, off = list.length - on;
+  const p2 = v => String(v).padStart(2, "0");
+  if ($("stat_on")) {
+    $("stat_on").querySelector("span").textContent = `${p2(on)}/${p2(list.length)} 在线`;
+    $("stat_on").title = `${scope}：在线 ${on} 台`;
+    $("stat_off").querySelector("span").textContent = `${p2(off)} 离线`;
+    $("stat_off").title = `${scope}：离线 ${off} 台`;
+    $("stat_off").style.opacity = off ? "1" : ".55";
+  }
   el.title = `${scope}累计流量｜实时 ↑ ${fmtSpeed(rtx)} ↓ ${fmtSpeed(rrx)}`;
   el.innerHTML = `总流量 ↑ <b>${fmtBytes(tx)}</b> ↓ <b>${fmtBytes(rx)}</b>`;
 }
@@ -480,7 +492,6 @@ function renderSummary() {
   const all = NODES || [];
   const list = visibleNodes();
   renderTotals(list);
-  $("meta").textContent = `${all.filter(n => n.online).length}/${all.length} 在线`;
   renderFilters();
   $("nodes").innerHTML = list.length ? list.map(card).join("")
     : (all.length ? `<div class="empty">没有符合筛选的节点。<br><br>
