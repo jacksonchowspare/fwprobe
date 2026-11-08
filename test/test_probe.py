@@ -398,6 +398,30 @@ class TestHTTP(unittest.TestCase):
         n = json.loads(body)["nodes"][0]
         self.assertEqual(n["groups"], ["老分组"])
 
+    def test_series_downsample(self):
+        """一个月的分钟数据不能原样丢给前端：必须降到 ≤720 点，且顺序与形状不变"""
+        rows = [{"ts": 1000 + i * 60, "cpu": 1.0 + (i % 7)} for i in range(900)]
+        out = P.downsample(rows, 720, ("cpu",))
+        self.assertEqual(len(out), 720)
+        self.assertEqual(out[0]["ts"], rows[0]["ts"])
+        self.assertEqual([r["ts"] for r in out], sorted(r["ts"] for r in out))
+        # 桶内平均：前两行 1.0 / 2.0 → 第一桶只有 1 行（900/720=1.25）
+        self.assertAlmostEqual(out[0]["cpu"], 1.0, 3)
+
+    def test_series_month_uses_hour_table(self):
+        """跨度 >10 天走小时聚合表（一个月的分钟聚合有 4 万点，不能查）"""
+        nid, _ = self.st.add_node("a")
+        now = int(time.time())
+        self.st.conn.execute(
+            "INSERT OR REPLACE INTO samples_hour(node_id,ts,cpu,mem_used,mem_total,disk_used,"
+            "disk_total,load1,rx_bps,tx_bps,tcp,udp) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (nid, now - 3600 * 5, 12.5, 100, 200, 10, 20, 0.1, 1000, 500, 3, 1))
+        self.st.conn.commit()
+        d = self.st.series(nid, 744)
+        self.assertEqual(d["hours"], 744)
+        self.assertEqual(len(d["points"]), 1)
+        self.assertAlmostEqual(d["points"][0]["cpu"], 12.5, 3)
+
     def test_series_endpoint(self):
         self._post("/api/report", payload(), token=self.tok)
         code, body = self._get(f"/api/public/series?node={self.nid}&hours=1")

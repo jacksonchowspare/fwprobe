@@ -145,7 +145,18 @@
   .charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
   .chart .t{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between}
-  .chart canvas{width:100%;height:110px;display:block}
+  .chart canvas{width:100%;height:130px;display:block}
+  #ranges button.active{color:var(--text);border-color:rgba(77,163,255,.55);background:rgba(77,163,255,.16)}
+  /* 系统信息：中间分开，左右各一半；按列填充（左边 6 项，右边 6 项） */
+  .sysgrid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:repeat(6,auto);
+    grid-auto-flow:column;column-gap:28px;row-gap:2px}
+  .sysgrid .kv{display:flex;align-items:baseline;gap:10px;padding:5px 0;border-bottom:1px dashed var(--border);min-width:0}
+  .sysgrid .kv span{color:var(--muted);font-size:12.5px;flex:none}
+  .sysgrid .kv b{margin-left:auto;font-weight:600;font-size:12.5px;text-align:right;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  @media (max-width:860px){
+    .sysgrid{grid-template-columns:1fr;grid-template-rows:none;grid-auto-flow:row;column-gap:0}
+  }
   /* 4K（含 125% 缩放的 3072）上 6 张（每张约 400px）；2560 及以下仍 4 张 */
   @media (min-width:3000px){
     .wrap{max-width:2480px}
@@ -181,10 +192,11 @@
       <button onclick="closeDetail()">← 返回</button>
       <h2 id="d_title"></h2>
       <span class="ver" id="d_sub"></span>
-      <div class="top-actions">
-        <button onclick="setRange(1)">1 小时</button>
-        <button onclick="setRange(24)">24 小时</button>
-        <button onclick="setRange(168)">7 天</button>
+      <div class="top-actions" id="ranges">
+        <button data-r="1" onclick="setRange(1)">1 小时</button>
+        <button data-r="24" onclick="setRange(24)">24 小时</button>
+        <button data-r="168" onclick="setRange(168)">7 天</button>
+        <button data-r="month" onclick="setRange('month')" id="range_month">1 个月</button>
       </div>
     </div>
     <div class="charts">
@@ -195,7 +207,7 @@
     </div>
     <div class="chart" style="margin-top:14px">
       <div class="t"><span>系统信息</span></div>
-      <div class="modal rows" id="d_sys" style="background:transparent;border:0;padding:0;box-shadow:none;max-height:none"></div>
+      <div class="sysgrid" id="d_sys"></div>
     </div>
   </div>
 
@@ -582,92 +594,174 @@ let CUR = null, RANGE = 24, DETAIL_TIMER = null;
 function openDetail(id) { location.hash = "#/node/" + id; }
 function closeDetail() { location.hash = ""; }
 
-function drawLine(canvasId, series, opts) {
-  const c = $(canvasId); if (!c) return;
-  const dpr = window.devicePixelRatio || 1;
-  const w = c.clientWidth || 300, h = c.clientHeight || 110;
-  c.width = Math.floor(w * dpr); c.height = Math.floor(h * dpr);
-  const ctx = c.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  const pts = (series || []).filter(p => p.v != null && isFinite(p.v));
-  if (!pts.length) {
-    ctx.fillStyle = "#8b98a9"; ctx.font = "12px sans-serif"; ctx.fillText("暂无数据", 8, h / 2);
-    return;
+function themeVar(name, fb) {
+  const v = getComputedStyle(document.body).getPropertyValue(name).trim();
+  return v || fb;
+}
+/* 选一个整数刻度上限：步长取 {1,2,5,10}×10^k 里能覆盖 target 的最小值，保证刻度不带小数 */
+function chooseYmax(target, maxAllowed) {
+  const steps = [];
+  for (let e = 0; e <= 8; e++) {
+    const base = Math.pow(10, e);
+    [1, 2, 5, 10].forEach(m => steps.push(m * base));
   }
-  const max = Math.max(...pts.map(p => p.v), opts.min || 1);
-  const pad = 6;
-  ctx.beginPath();
-  pts.forEach((p, i) => {
-    const x = pad + (i / Math.max(1, pts.length - 1)) * (w - pad * 2);
-    const y = h - pad - (p.v / max) * (h - pad * 2);
-    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-  });
-  ctx.strokeStyle = opts.color || "#4da3ff"; ctx.lineWidth = 1.6; ctx.stroke();
-  ctx.lineTo(w - pad, h - pad); ctx.lineTo(pad, h - pad); ctx.closePath();
-  ctx.fillStyle = opts.fill || "rgba(77,163,255,.14)"; ctx.fill();
+  steps.sort((a, b) => a - b);
+  const t = Math.max(1, target || 1);
+  for (const s of steps) {
+    const ymax = s * 4;
+    if (ymax >= t) return maxAllowed ? Math.min(ymax, maxAllowed) : ymax;
+  }
+  return maxAllowed || t;
+}
+function niceMax(v) {
+  if (!isFinite(v) || v <= 0) return 1;
+  const base = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / base;
+  const step = n <= 1 ? 1 : (n <= 2 ? 2 : (n <= 5 ? 5 : 10));
+  return step * base;
+}
+function pct(arr, q) {
+  if (!arr.length) return 0;
+  const a = [...arr].sort((x, y) => x - y);
+  return a[Math.min(a.length - 1, Math.max(0, Math.round((a.length - 1) * q)))];
+}
+function axisTime(ts, hours) {
+  const d = new Date(ts * 1000), p2 = n => String(n).padStart(2, "0");
+  if (hours <= 24) return p2(d.getHours()) + ":" + p2(d.getMinutes());
+  if (hours <= 24 * 10) return (d.getMonth() + 1) + "/" + d.getDate() + " " + p2(d.getHours()) + "时";
+  return (d.getMonth() + 1) + "/" + d.getDate();
 }
 
-function drawMulti(canvasId, groups, opts) {
+/* 统一画图：带 XY 轴、网格线、时间刻度；X 按真实时间比例（掉线留空档，不挤在一起） */
+function drawChart(canvasId, groups, opts) {
+  opts = opts || {};
   const c = $(canvasId); if (!c) return;
   const dpr = window.devicePixelRatio || 1;
-  const w = c.clientWidth || 300, h = c.clientHeight || 110;
+  const w = c.clientWidth || 300, h = c.clientHeight || 130;
   c.width = Math.floor(w * dpr); c.height = Math.floor(h * dpr);
   const ctx = c.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const all = [];
-  groups.forEach(g => (g.points || []).forEach(p => { if (p.v != null && isFinite(p.v)) all.push(p.v); }));
-  if (!all.length) {
-    ctx.fillStyle = "#8b98a9"; ctx.font = "12px sans-serif"; ctx.fillText("暂无数据", 8, h / 2);
+
+  const data = [];
+  (groups || []).forEach(g => (g.points || []).forEach(p => {
+    if (p.v != null && isFinite(p.v)) data.push({ ts: p.ts, v: p.v });
+  }));
+  const muted = themeVar("--muted", "#8b98a9");
+  const border = themeVar("--border", "rgba(255,255,255,.12)");
+  if (!data.length) {
+    ctx.fillStyle = muted; ctx.font = "12px sans-serif";
+    ctx.fillText("暂无数据", 10, h / 2);
     return;
   }
-  const max = Math.max(...all, opts.min || 1);
-  const pad = 6;
-  groups.forEach(g => {
+
+  const live = (groups || []).filter(g => (g.points || []).some(p => p.v != null));
+  const multi = live.length > 1 || opts.legend;
+  const L = 44, R = 10, T = multi ? 20 : 10, B = 18;
+  const pw = Math.max(10, w - L - R), ph = Math.max(10, h - T - B);
+
+  const t0 = Math.min(...data.map(p => p.ts));
+  const t1 = Math.max(...data.map(p => p.ts));
+  // Y 轴刻度取整：先按「峰值/4」找好看的步长，再定上限，避免出现 12.5%、37.5% 这类读数
+  const yticks = 4;
+  const vals = data.map(p => p.v);
+  const ref = opts.p95 ? pct(vals, 0.95) : Math.max(...vals, opts.min || 1);
+  const target = Math.max(ref, opts.floor || 0);
+  let ymax = chooseYmax(target, opts.max);
+  if (ymax <= 0) ymax = 1;
+  const X = ts => L + (t1 > t0 ? (ts - t0) / (t1 - t0) : 0.5) * pw;
+  const Y = v => T + ph - Math.max(0, Math.min(1, v / ymax)) * ph;
+
+  // 网格 + Y 轴刻度
+  ctx.font = "10px -apple-system,'Segoe UI',sans-serif";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= yticks; i++) {
+    const v = ymax * i / yticks, y = Math.round(Y(v)) + 0.5;
+    ctx.strokeStyle = border; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+    ctx.fillStyle = muted; ctx.textAlign = "right";
+    ctx.fillText(opts.yfmt ? opts.yfmt(v) : String(Math.round(v)), L - 6, y);
+  }
+  // X 轴时间刻度
+  const xticks = 4;
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  // 刻度格式按「实际有数据的跨度」定：选了 1 个月但只有几小时数据时，显示时:分 而不是五个相同日期
+  const spanH = ((t1 - t0) / 3600) || opts.hours || 1;
+  for (let i = 0; i <= xticks; i++) {
+    const ts = t0 + (t1 - t0) * i / xticks;
+    const x = Math.max(L + 16, Math.min(L + pw - 16, X(ts)));
+    ctx.fillStyle = muted;
+    ctx.fillText(axisTime(ts, spanH), x, h - 5);
+  }
+
+  // 折线（单组时带面积填充）
+  live.forEach(g => {
     const pts = (g.points || []).filter(p => p.v != null && isFinite(p.v));
-    if (pts.length < 1) return;
+    if (!pts.length) return;
     ctx.beginPath();
-    pts.forEach((p, i) => {
-      const x = pad + (i / Math.max(1, pts.length - 1)) * (w - pad * 2);
-      const y = h - pad - (p.v / max) * (h - pad * 2);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    ctx.strokeStyle = g.color; ctx.lineWidth = 1.6; ctx.stroke();
+    pts.forEach((p, i) => { const x = X(p.ts), y = Y(p.v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.strokeStyle = g.color || "#4da3ff";
+    ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.stroke();
+    if (live.length === 1 && opts.fill) {
+      ctx.lineTo(X(pts[pts.length - 1].ts), T + ph);
+      ctx.lineTo(X(pts[0].ts), T + ph);
+      ctx.closePath();
+      ctx.fillStyle = opts.fill; ctx.fill();
+    }
   });
+
   // 图例
-  ctx.font = "10px sans-serif";
-  let lx = pad;
-  groups.forEach(g => {
-    ctx.fillStyle = g.color;
-    ctx.fillRect(lx, 4, 6, 6);
-    ctx.fillStyle = "#8b98a9";
-    ctx.fillText(g.name, lx + 9, 10);
-    lx += 16 + ctx.measureText(g.name).width;
-  });
+  if (multi) {
+    ctx.font = "10px -apple-system,'Segoe UI',sans-serif";
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    let lx = L;
+    live.forEach(g => {
+      ctx.fillStyle = g.color || "#4da3ff";
+      ctx.fillRect(lx, T - 12, 6, 6);
+      ctx.fillStyle = muted;
+      const name = g.name || "";
+      ctx.fillText(name, lx + 9, T - 9);
+      lx += 18 + ctx.measureText(name).width;
+    });
+    ctx.textBaseline = "middle";
+  }
+}
+
+function monthDays() {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();   // 当月实际天数（28/29/30/31）
+}
+function rangeHours() {
+  return RANGE === "month" ? monthDays() * 24 : Number(RANGE);
 }
 
 async function loadDetail() {
   if (!CUR) return;
+  const HOURS = rangeHours();
   $("d_title").textContent = `${flag(CUR.country)} ${CUR.alias}`;
   $("d_sub").textContent = `${CUR.os_name || CUR.os_id || ""} · ${CUR.online ? "在线" : "离线"}`;
+  if ($("range_month")) $("range_month").title = `当前月份共 ${monthDays()} 天`;
   try {
-    const r = await fetch(`/api/public/series?node=${encodeURIComponent(CUR.id)}&hours=${RANGE}`, { cache: "no-store" });
+    const r = await fetch(`/api/public/series?node=${encodeURIComponent(CUR.id)}&hours=${HOURS}`, { cache: "no-store" });
     const d = await r.json();
     const P = d.points || [];
-    drawLine("ch_cpu", P.map(p => ({ ts: p.ts, v: p.cpu })), { color: "#4da3ff", fill: "rgba(77,163,255,.14)", min: 20 });
-    drawLine("ch_mem", P.map(p => ({ ts: p.ts, v: p.mem_total ? 100 * p.mem / p.mem_total : null })),
-             { color: "#a78bfa", fill: "rgba(167,139,250,.16)", min: 100 });
-    const netPts = [];
-    P.forEach(p => { netPts.push({ ts: p.ts, v: p.tx }); netPts.push({ ts: p.ts, v: p.rx }); });
-    drawLine("ch_net", netPts, { color: "#34d399", fill: "rgba(52,211,153,.12)" });
+    drawChart("ch_cpu", [{ points: P.map(p => ({ ts: p.ts, v: p.cpu })) }],
+              { color: "#4da3ff", fill: "rgba(77,163,255,.14)", floor: 20, max: 100,
+                yfmt: v => Math.round(v) + "%", hours: HOURS });
+    drawChart("ch_mem", [{ points: P.map(p => ({ ts: p.ts, v: p.mem_total ? 100 * p.mem / p.mem_total : null })) }],
+              { color: "#a78bfa", fill: "rgba(167,139,250,.16)", floor: 100, max: 100,
+                yfmt: v => Math.round(v) + "%", hours: HOURS });
+    drawChart("ch_net", [
+      { name: "上行", color: "#34d399", points: P.map(p => ({ ts: p.ts, v: p.tx })) },
+      { name: "下行", color: "#fbbf24", points: P.map(p => ({ ts: p.ts, v: p.rx })) }
+    ], { yfmt: v => fmtSpeed(v), hours: HOURS });
     const checks = d.checks || {};
-    const LCOL = { "上海电信": "#34d399", "上海联通": "#4da3ff", "上海移动": "#fbbf24" };
-    drawMulti("ch_lat", Object.keys(checks).map(k => ({
-      name: k.replace("上海", ""),
-      color: LCOL[k] || "#a78bfa",
-      points: (checks[k] || []).map(x => ({ ts: x.ts, v: x.avg }))
-    })), { min: 20 });
+    const LCOL = ["#34d399", "#4da3ff", "#fbbf24", "#a78bfa", "#f472b6"];
+    drawChart("ch_lat", Object.keys(checks).map((k, i) => ({
+      name: k,
+      color: LCOL[i % LCOL.length],
+      points: (checks[k] || []).map(x => ({ ts: x.ts, v: x.ok ? x.avg : null }))
+    })), { yfmt: v => Math.round(v) + "ms", p95: true, floor: 50, max: 1000, hours: HOURS });
 
     const last = P[P.length - 1] || {};
     $("c_cpu").textContent = fmtPct(last.cpu);
@@ -676,7 +770,7 @@ async function loadDetail() {
     const latTxt = Object.keys(checks).map(k => {
       const arr = (checks[k] || []).filter(x => x && x.ok);
       const x = arr[arr.length - 1];
-      return x ? `${k.replace("上海", "")} ${Math.round(x.avg)}ms` : `${k.replace("上海", "")} 超时`;
+      return x ? `${k} ${Math.round(x.avg)}ms` : `${k} 超时`;
     });
     $("c_lat").textContent = latTxt.join(" · ");
     const s = CUR.sample || {};
@@ -693,7 +787,12 @@ async function loadDetail() {
     $("d_sys").innerHTML = `<div>加载失败<b>${e.message}</b></div>`;
   }
 }
-function setRange(h) { RANGE = h; loadDetail(); }
+function setRange(h) {
+  RANGE = h;
+  const btns = document.querySelectorAll("#ranges button");
+  btns.forEach(b => b.classList.toggle("active", String(b.dataset.r) === String(h)));
+  loadDetail();
+}
 
 function route() {
   const m = (location.hash || "").match(/^#\/node\/(.+)$/);
@@ -702,6 +801,8 @@ function route() {
     $("nodes").style.display = "none";
     $("filters").style.display = "none";
     $("detail").classList.add("show");
+    document.querySelectorAll("#ranges button").forEach(b =>
+      b.classList.toggle("active", String(b.dataset.r) === String(RANGE)));
     loadDetail();
     if (!DETAIL_TIMER) DETAIL_TIMER = setInterval(loadDetail, 30000);
   } else {

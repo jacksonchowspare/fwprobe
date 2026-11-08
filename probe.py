@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.3.7"
+VERSION = "0.3.9"
 APP_NAME = "fwprobe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -153,6 +153,35 @@ def sha256_hex(s: str) -> str:
 
 def new_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+MAX_SERIES_POINTS = 720        # 详情页曲线最多给前端 720 个点（画布 ~1000px，再多就是无效像素）
+
+
+def downsample(rows, limit, keys):
+    """把时间序列按等宽桶取平均降到 limit 以内。保留每桶的 ts（桶内首条）。
+
+    为什么在服务端降：一个月的分钟聚合是 4 万多点，既撑爆 JSON 也画不出东西；
+    降到 720 点后一个月 ≈ 每小时一个点，曲线形状仍然对。
+    """
+    rows = [r for r in rows if r]
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    step = len(rows) / float(limit)
+    out = []
+    for i in range(int(limit)):
+        chunk = rows[int(i * step):int((i + 1) * step)] or [rows[min(len(rows) - 1, int(i * step))]]
+        item = {"ts": chunk[0].get("ts")}
+        for k in keys:
+            if not any(k in c for c in chunk):
+                continue
+            vals = [c[k] for c in chunk if isinstance(c.get(k), (int, float))]
+            item[k] = (sum(vals) / len(vals)) if vals else None
+        # 非平均字段（ok 等）沿用最后一条
+        for k, v in chunk[-1].items():
+            item.setdefault(k, v)
+        out.append(item)
+    return out
 
 
 def parse_groups(raw, fallback=""):
@@ -441,11 +470,11 @@ class Store:
         return {"rx": [r["rx_bps"] or 0 for r in rows], "tx": [r["tx_bps"] or 0 for r in rows]}
 
     def series(self, nid, hours=24):
-        """详情页曲线：<=24h 原始 30s；<=30d 分钟聚合；更久用小时聚合"""
+        """详情页曲线：<=24h 原始 30s；<=10d 分钟聚合；更久用小时聚合；最后统一降采样到 ≤720 点"""
         span = max(1, int(hours))
         now = int(time.time())
         since = now - span * 3600
-        table = "samples" if span <= 24 else ("samples_min" if span <= 24 * 30 else "samples_hour")
+        table = "samples" if span <= 24 else ("samples_min" if span <= 24 * 10 else "samples_hour")
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT ts,cpu,mem_used,mem_total,disk_used,disk_total,load1,rx_bps,tx_bps,tcp,udp"
@@ -463,6 +492,10 @@ class Store:
         for r in crows:
             checks.setdefault(r["name"], []).append(
                 {"ts": r["ts"], "ok": r["ok"], "loss": r["loss"], "avg": r["ravg"], "max": r["rmax"]})
+        points = downsample(points, MAX_SERIES_POINTS,
+                            ("cpu", "mem", "mem_total", "disk", "disk_total", "load1", "rx", "tx", "tcp", "udp"))
+        for name in list(checks):
+            checks[name] = downsample(checks[name], MAX_SERIES_POINTS, ("avg", "max", "loss"))
         return {"hours": span, "points": points, "checks": checks}
 
     # -- 维护 ---------------------------------------------------------------
