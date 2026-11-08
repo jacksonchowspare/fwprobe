@@ -561,6 +561,30 @@ class TestHTTP(unittest.TestCase):
         self.assertTrue(self.st.del_ptoken(pid))
         self.assertIsNone(self.st.find_ptoken(tok))
 
+    def test_provision_list_and_remove(self):
+        """供应令牌：能列出自己建的节点，也能在卸载探针后删节点（面板「卸载探针」用）"""
+        _, tok = self.st.add_ptoken("fwpanel2")
+        code, body = self._post("/api/provision/node", {"alias": "面板建的A"}, token=tok, csrf=False)
+        self.assertEqual(code, 200, body)
+        nid = json.loads(body)["id"]
+        code, body = self._post("/api/nodes", {"alias": "手动建的"}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        manual_id = json.loads(body)["id"]
+
+        code, body = self._get("/api/provision/nodes", token=tok)
+        self.assertEqual(code, 200, body)
+        aliases = [n["alias"] for n in json.loads(body)["nodes"]]
+        self.assertIn("面板建的A", aliases)
+        self.assertNotIn("手动建的", aliases)        # 不是它建的不出现在列表里
+
+        code, body = self._post("/api/provision/remove", {"alias": "面板建的A"}, token=tok, csrf=False)
+        self.assertEqual(code, 200, body)
+        self.assertIsNone(self.st.node(nid))
+        # 手动建的节点它删不掉
+        code, body = self._post("/api/provision/remove", {"alias": "手动建的"}, token=tok, csrf=False)
+        self.assertEqual(code, 404)
+        self.assertIsNotNone(self.st.node(manual_id))
+
     def test_uninstall_flow(self):
         """卸载：下发标记 → 上报应答带 uninstall → agent 回执后节点被移除"""
         code, body = self._post("/api/nodes", {"alias": "待卸载机"}, token="admin-test")

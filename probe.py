@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.10"
+VERSION = "0.5.11"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -968,6 +968,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 hours = 24
             return self._send(200, self.store.series(nid, hours))
+        if path == "/api/provision/nodes":            # 外部面板：看自己建的节点（对账用）
+            return self._provision_nodes()
         if path == "/api/nodes":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
@@ -1119,6 +1121,29 @@ class Handler(BaseHTTPRequestHandler):
                                    "url": base + "/agent.py",
                                    "sha256": meta_sha}
             return self._send(200, resp)
+        if path == "/api/provision/nodes":
+            return self._provision_nodes()
+        if path == "/api/provision/remove":           # 外部面板：卸载探针后删掉节点记录
+            ptok = self.store.find_ptoken(self._bearer())
+            if not ptok:
+                return self._send(401, {"error": "供应令牌无效"})
+            data = self._json_body() or {}
+            alias = (data.get("alias") or "").strip()
+            nid = (data.get("id") or "").strip()
+            target = None
+            for n in self.store.nodes():
+                if nid and n["id"] == nid:
+                    target = n
+                    break
+                if alias and n.get("alias") == alias and (n.get("note") or "").startswith("由供应令牌"):
+                    target = n
+                    break
+            if not target:
+                return self._send(404, {"error": "找不到该节点"})
+            self.store.delete_node(target["id"])
+            self.store.audit("provision_remove", target.get("alias") or target["id"],
+                             f"via {ptok.get('label') or ptok.get('id')}", self._peer_ip())
+            return self._send(200, {"ok": True, "removed": target["id"]})
         if path == "/api/provision/node":             # 外部面板（fwpanel2）按需建探针节点
             ptok = self.store.find_ptoken(self._bearer())
             if not ptok:
@@ -1225,6 +1250,28 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     # -- 静态 ---------------------------------------------------------------
+    def _provision_nodes(self):
+        """供应令牌视角：列出由供应令牌创建的节点（给面板对账用）"""
+        ptok = self.store.find_ptoken(self._bearer())
+        if not ptok:
+            return self._send(401, {"error": "供应令牌无效"})
+        now = int(time.time())
+        out = []
+        for n in self.store.nodes():
+            if not (n.get("note") or "").startswith("由供应令牌"):
+                continue
+            groups = n.get("groups") or "[]"
+            if isinstance(groups, str):
+                try:
+                    groups = json.loads(groups)
+                except ValueError:
+                    groups = []
+            out.append({"id": n["id"], "alias": n.get("alias", ""), "groups": groups,
+                        "agent_ver": n.get("agent_ver", ""),
+                        "online": bool(n.get("last_seen") and
+                                       now - int(n["last_seen"]) < OFFLINE_AFTER)})
+        return self._send(200, {"ok": True, "nodes": out})
+
     def _serve_static(self, name, ctype):
         p = os.path.join(STATIC_DIR, name)
         try:
