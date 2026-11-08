@@ -10,12 +10,15 @@
     --text:#e6edf3; --muted:#8b98a9; --accent:#4da3ff; --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
     --track:rgba(255,255,255,.10); --hover:rgba(255,255,255,.06);
     --shadow:0 4px 20px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.04);
+    /* 三网 5 档（Komari Glassmorphism 口径）：延迟 ≤60/100/160/200，丢包 ≤1/3/6/9% */
+    --t1:#059669; --t2:#22c55e; --t3:#a3e635; --t4:#facc15; --t5:#f43f5e;
   }
   body[data-theme="light"]{
     --bg:#eef2f7; --card:rgba(255,255,255,.88); --solid:#ffffff; --border:rgba(15,23,42,.12);
     --text:#0f172a; --muted:#64748b; --accent:#2f6ff0; --ok:#16a34a; --warn:#b45309; --bad:#dc2626;
     --track:rgba(15,23,42,.10); --hover:rgba(15,23,42,.05);
     --shadow:0 6px 18px rgba(15,23,42,.08);
+    --t1:#047857; --t2:#16a34a; --t3:#65a30d; --t4:#ca8a04; --t5:#e11d48;
   }
   *{box-sizing:border-box}
   body{
@@ -283,13 +286,26 @@ function spark(data, color) {
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1" opacity=".45"/>${dots}</svg>`;
 }
 /* 延迟分档：1-99 绿 / 100-199 黄 / ≥200 红 / 超时灰 */
-const LAT_COLOR = ms => ms == null ? "var(--muted)" : (ms < 100 ? "var(--ok)" : (ms < 200 ? "var(--warn)" : "var(--bad)"));
-const LAT_CLASS = ms => ms == null ? "" : (ms < 100 ? "ok" : (ms < 200 ? "warn" : "bad"));
-/* 丢包分档：0 绿 / 1-9 黄 / ≥10 红 / 超时灰 */
-const LOSS_COLOR = (loss, ok) => !ok ? "var(--muted)"
-  : (loss <= 0 ? "var(--ok)" : (loss < 10 ? "var(--warn)" : "var(--bad)"));
+/* 5 档上色，阈值与 Komari Glassmorphism 主题一致 */
+function latColor(ms) {
+  if (ms == null) return "var(--muted)";
+  if (ms <= 60) return "var(--t1)";
+  if (ms <= 100) return "var(--t2)";
+  if (ms <= 160) return "var(--t3)";
+  if (ms <= 200) return "var(--t4)";
+  return "var(--t5)";
+}
+function lossColor(loss) {
+  if (loss == null) return "var(--muted)";
+  if (loss <= 1) return "var(--t1)";
+  if (loss <= 3) return "var(--t2)";
+  if (loss <= 6) return "var(--t3)";
+  if (loss <= 9) return "var(--t4)";
+  return "var(--t5)";
+}
+const LAT_CLASS = ms => ms == null ? "" : (ms <= 100 ? "ok" : (ms <= 200 ? "warn" : "bad"));
 
-const CELLS = 20;   // 20 格 = 最近 20 次探测（30s 一次 → 约 10 分钟，每分钟走 2 格）
+const CELLS = 20;   // 20 格 = 最近 1 小时，每格 3 分钟（服务端分桶，与 Komari 主题一致）
 
 /* 滚动历史条：旧的在左、最新在右（新数据从右边进来，整体往左推）。
    用 SVG 按 viewBox 等分画格子 —— 不依赖 flex 的亚像素取整，缩放和不同 DPR 下缝隙都均匀 */
@@ -309,12 +325,11 @@ function strip(hist, kind, n) {
       const hm = new Date((h.ts || 0) * 1000);
       const hhmm = String(hm.getHours()).padStart(2, "0") + ":" + String(hm.getMinutes()).padStart(2, "0");
       if (kind === "lat") {
-        const ms = h.ok ? (h.min != null ? h.min : h.avg) : null;
-        color = ms == null ? "var(--muted)" : LAT_COLOR(ms);
-        tip = ms == null ? hhmm + " 超时" : hhmm + " " + Math.round(ms) + " ms";
+        color = latColor(h.latency);
+        tip = h.latency == null ? hhmm + " 全部超时" : hhmm + " " + Math.round(h.latency) + " ms";
       } else {
-        color = LOSS_COLOR(h.loss || 0, h.ok);
-        tip = h.ok ? hhmm + " 丢包 " + (h.loss || 0).toFixed(0) + "%" : hhmm + " 超时";
+        color = lossColor(h.loss);
+        tip = hhmm + " 丢包 " + (h.loss == null ? "-" : h.loss.toFixed(1) + "%");
       }
     }
     rects += "<rect x=\"" + (i * seg + gap / 2).toFixed(3) + "\" y=\"0\" width=\"" + (seg - gap).toFixed(3)
@@ -336,16 +351,18 @@ function card(n) {
   const quota = n.quota_bytes || 0, used = n.used_bytes || 0;
   const quotaPct = quota ? Math.min(100, 100 * used / quota) : 0;
   const fam = (n.checks || []).some(c => String(c.family) === "6") ? "v6" : "v4";
+  const three = n.three || {targets: {}};
   const lat = (n.checks || []).map(c => {
-    const ms = c.ok ? (c.rmin != null ? c.rmin : c.ravg) : null;
-    const loss = c.loss || 0;
-    const h = (n.hist || {})[c.name] || [];
+    const t = (three.targets || {})[c.name] || {};
+    const ms = t.avg_latency == null ? null : t.avg_latency;
+    const loss = t.avg_loss == null ? null : t.avg_loss;
+    const b = t.buckets || [];
     return `<div class="r">
       <span class="name">${esc(c.name)}</span>
-      ${strip(h, "lat")}
-      <span class="ms ${LAT_CLASS(ms)}">${ms == null ? "超时" : Math.round(ms) + " ms"}</span>
-      ${strip(h, "loss")}
-      <span class="loss">${loss.toFixed(0)}%</span>
+      ${strip(b, "lat")}
+      <span class="ms ${LAT_CLASS(ms)}">${ms == null ? "-" : Math.round(ms) + " ms"}</span>
+      ${strip(b, "loss")}
+      <span class="loss ${loss != null && loss > 9 ? "bad" : ""}">${loss == null ? "-" : loss.toFixed(1) + "%"}</span>
     </div>`;
   }).join("");
   return `<div class="card" onclick="openDetail('${n.id}')">
@@ -396,7 +413,7 @@ function card(n) {
     <div class="kvline"><span>TCP 连接 <b>${s.tcp == null ? "-" : s.tcp}</b></span>
       <span>UDP 连接 <b>${s.udp == null ? "-" : s.udp}</b></span></div>
     <div class="lat">
-      <div class="lat-cap">三网延迟 · 最近 20 次探测（每格 1 分钟）</div>
+      <div class="lat-cap">三网延迟 · 最近 1 小时（每格 3 分钟，显示平均延迟 / 平均丢包）</div>
       ${lat || '<div class="r"><span class="name">探测</span><svg class="strip" viewBox="0 0 100 10" preserveAspectRatio="none"></svg><span class="ms">-</span><svg class="strip" viewBox="0 0 100 10" preserveAspectRatio="none"></svg><span class="loss">-</span></div>'}
     </div>
     <div class="foot">
@@ -541,8 +558,15 @@ function openQuick(id) {
     ["配额", n.quota_bytes ? fmtBytes(n.quota_bytes) : "不限"], ["到期", n.expires_at || "—"],
     ["运行时长", fmtDur(s.uptime)], ["Agent", n.agent_ver || "—"]
   ];
-  const lat = (n.checks || []).map(c => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;color:var(--muted)">
-      <span>${c.name}</span><b style="color:${LAT_COLOR(c.ok ? (c.rmin != null ? c.rmin : c.ravg) : null)}">${c.ok ? Math.round(c.rmin != null ? c.rmin : c.ravg) + " ms" : "超时"}</b></div>`).join("");
+  const th = n.three || {targets: {}};
+  const lat = (n.checks || []).map(c => {
+    const t = (th.targets || {})[c.name] || {};
+    const ms = t.avg_latency == null ? null : t.avg_latency;
+    const loss = t.avg_loss == null ? null : t.avg_loss;
+    return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;color:var(--muted)">
+      <span>${esc(c.name)}</span><b style="color:${latColor(ms)}">${ms == null ? "-" : Math.round(ms) + " ms"}</b>
+      <span style="margin-left:auto">${loss == null ? "-" : loss.toFixed(1) + "%"}</span></div>`;
+  }).join("");
   $("quick").innerHTML = `
     <h3>${flag(n.country)} ${n.alias}<button class="ico close" onclick="closeQuick()">✕</button></h3>
     <div class="sub">${n.os_name || n.os_id || ""} · ${n.online ? "在线" : "离线"}</div>

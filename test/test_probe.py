@@ -183,6 +183,53 @@ class TestStore(unittest.TestCase):
         self.assertEqual(ct[-1]["min"], 64.0)
         self.assertTrue(all(ct[i]["ts"] <= ct[i + 1]["ts"] for i in range(len(ct) - 1)))
 
+    def test_three_buckets(self):
+        """三网口径：1 小时分 20 格（每格 3 分钟），格值取平均 + 格内丢包率"""
+        nid, _ = self.st.add_node("a")
+        now = int(time.time())
+        # 注意：主键是 (node_id, ts, name)，同一条线路同一秒只能有一行（一轮一个值），
+        # 所以同一格内要错开几秒
+        rows = [
+            # 第 0 格 [now-3600, now-3420)：成功 100ms、200ms 各一次，丢包一次
+            (nid, now - 3500, "上海电信", 1, 0.0, 100.0, 100.0, 100.0),
+            (nid, now - 3460, "上海电信", 1, 0.0, 200.0, 200.0, 200.0),
+            (nid, now - 3440, "上海电信", 0, 100.0, None, None, None),
+            # 最后一格（当前）
+            (nid, now - 60, "上海电信", 1, 0.0, 50.0, 50.0, 50.0),
+        ]
+        for r in rows:
+            self.st.conn.execute(
+                "INSERT OR REPLACE INTO checks(node_id,ts,name,ok,loss,rmin,ravg,rmax)"
+                " VALUES(?,?,?,?,?,?,?,?)", r)
+        self.st.conn.commit()
+
+        t = self.st.three(nid)
+        self.assertEqual(t["bucket_seconds"], 180)
+        target = t["targets"]["上海电信"]
+        self.assertEqual(len(target["buckets"]), 20)
+        self.assertAlmostEqual(target["buckets"][0]["latency"], 150.0, 1)   # (100+200)/2
+        self.assertAlmostEqual(target["buckets"][0]["loss"], 33.3, 1)      # 1/3 丢
+        self.assertIsNone(target["buckets"][10])                            # 空桶 → 前端画灰
+        self.assertAlmostEqual(target["buckets"][19]["latency"], 50.0, 1)
+        self.assertAlmostEqual(target["avg_latency"], 116.7, 1)             # (100+200+50)/3
+        self.assertAlmostEqual(target["avg_loss"], 25.0, 1)                 # 1/4 丢
+
+    def test_checks_dedupe_by_checks_ts(self):
+        """同一轮探测被多次上报（资源 30s 报一次、探测 60s 一次）时不能重复入库"""
+        nid, _ = self.st.add_node("a")
+        node = self.st.node(nid)
+        now = int(time.time())
+        p = payload(); p["ts"] = now; p["checks_ts"] = now - 5
+        self.st.ingest(node, p, "1.1.1.1")
+        self.st.ingest(node, p, "1.1.1.1")          # 30 秒后又报同一轮
+        got = self.st.conn.execute("SELECT COUNT(*) FROM checks WHERE node_id=?", (nid,)).fetchone()[0]
+        self.assertEqual(got, len(p["checks"]))     # 没有翻倍
+
+        p2 = payload(); p2["ts"] = now + 30; p2["checks_ts"] = now + 25
+        self.st.ingest(node, p2, "1.1.1.1")         # 新的一轮
+        got = self.st.conn.execute("SELECT COUNT(*) FROM checks WHERE node_id=?", (nid,)).fetchone()[0]
+        self.assertEqual(got, 2 * len(p["checks"]))
+
     def test_spark_series(self):
         nid, _ = self.st.add_node("a")
         node = self.st.node(nid)
@@ -447,6 +494,22 @@ class TestTcping(unittest.TestCase):
             self.sock.close()
         except OSError:
             pass
+
+    def test_probe_once_single_value(self):
+        """Komari 口径：一轮只出一个值，min=avg=max；丢包记 100%"""
+        r = A.probe_once("127.0.0.1", self.port, "tcp")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["loss"], 0.0)
+        self.assertEqual(r["min"], r["avg"])
+        self.assertEqual(r["avg"], r["max"])
+        self.assertIsNotNone(r["addr"])
+
+    def test_probe_once_closed_port_is_loss(self):
+        sk = socket.socket(); sk.bind(("127.0.0.1", 0)); free_port = sk.getsockname()[1]; sk.close()
+        r = A.probe_once("127.0.0.1", free_port, "tcp", timeout=0.5)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["loss"], 100.0)
+        self.assertIsNone(r["avg"])
 
     def test_tcping_ok(self):
         r = A.tcping("127.0.0.1", self.port, attempts=3)

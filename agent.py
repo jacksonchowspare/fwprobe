@@ -37,7 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.5"
+VERSION = "0.3.6"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
@@ -250,27 +250,131 @@ def resolve(host, family="auto"):
     return (addrs[0] if addrs else None), tag
 
 
-def tcping(host, port, attempts=4, timeout=4.0, family="auto"):
+# Komari 口径（komari-agent/server/task.go）：每轮只取一个数据点，不做多次平均。
+# 1) 单次测量，超时 3s，DNS 解析单独做、不计入耗时
+# 2) 首次 >1000ms 就重试，最多 3 次，取第一个 ≤1000ms 的结果
+# 3) TCP 模式特判：首次比后续低 800ms 以上 → SYN 重传（线路并没这么好），记丢包
+# 4) 重试完仍 >1000ms → 记丢包
+CHECK_TIMEOUT = 3.0
+HIGH_LAT_MS = 1000.0
+HIGH_LAT_RETRIES = 3
+TCP_RETRANS_DIFF = 800.0
+
+_ROTATION = {}          # 目标 → 轮次计数：多 A 记录按轮次轮换，避免一轮混测不同边缘
+
+
+def _tcp_once(addr, port, timeout):
+    t0 = time.time()
+    s = socket.create_connection((addr, int(port or 80)), timeout=timeout)
+    s.close()
+    return (time.time() - t0) * 1000.0
+
+
+def _icmp_once(addr, family, timeout):
+    """单包 ICMP。原始套接字，需要 root / CAP_NET_RAW。"""
+    fam_i = socket.AF_INET6 if str(family) == "6" else socket.AF_INET
+    s = socket.socket(fam_i, socket.SOCK_RAW,
+                      socket.IPPROTO_ICMP if fam_i == socket.AF_INET else socket.IPPROTO_ICMPV6)
+    try:
+        s.settimeout(timeout)
+        ident = os.getpid() & 0xFFFF
+        payload = struct.pack("!d", time.time()) + b"fwprobe"
+        hdr = struct.pack("!BBHHH", 8, 0, 0, ident, 1)
+        pkt = struct.pack("!BBHHH", 8, 0, _icmp_checksum(hdr + payload), ident, 1) + payload
+        t0 = time.time()
+        s.sendto(pkt, (addr, 0))
+        while True:
+            r, _, _ = select.select([s], [], [], timeout)
+            if not r:
+                raise socket.timeout()
+            data, peer = s.recvfrom(2048)
+            if peer[0] != addr:
+                continue
+            off = 20 if fam_i == socket.AF_INET else 0
+            if len(data) < off + 8 or data[off] not in (0, 129):
+                continue
+            return (time.time() - t0) * 1000.0
+    finally:
+        s.close()
+
+
+def probe_once(host, port=80, proto="tcp", family="auto", timeout=None):
+    """按 Komari 口径测一个点，返回 {ok, loss, min, avg, max, family, addr, note}。
+
+    min/avg/max 三者相同 —— 一次测量只有一个值，保留字段是为了兼容已有存储与前端。
+    """
+    timeout = CHECK_TIMEOUT if timeout is None else timeout
     addrs, fam = resolve_all(host, family)
     if not addrs:
         return {"ok": False, "loss": 100.0, "min": None, "avg": None, "max": None,
-                "family": fam, "error": "DNS 解析失败"}
-    rtts, fails = [], 0
-    for i in range(attempts):
-        addr = addrs[i % len(addrs)]          # 多地址轮流测
-        t0 = time.time()
+                "family": fam, "addr": None, "note": "DNS 解析失败"}
+
+    key = "%s|%s" % (host, family)
+    idx = _ROTATION.get(key, 0)
+    _ROTATION[key] = idx + 1
+    addr = addrs[idx % len(addrs)]          # 一轮只打一个地址，下一轮换下一个
+
+    def measure():
+        if proto == "icmp":
+            return _icmp_once(addr, fam, timeout)
+        return _tcp_once(addr, port, timeout)
+
+    def attempt():
         try:
-            s = socket.create_connection((addr, int(port or 80)), timeout=timeout)
-            s.close()
-            rtts.append((time.time() - t0) * 1000.0)
-        except OSError:
-            fails += 1
-    loss = round(fails * 100.0 / attempts, 1)
-    if not rtts:
-        return {"ok": False, "loss": 100.0, "min": None, "avg": None, "max": None, "family": fam}
-    return {"ok": True, "loss": loss, "min": round(min(rtts), 1),
-            "avg": round(sum(rtts) / len(rtts), 1), "max": round(max(rtts), 1),
-            "family": fam, "addrs": len(addrs)}
+            return measure(), None
+        except (OSError, socket.timeout):
+            return None, "timeout"
+
+    first, err = attempt()
+    if err:
+        return {"ok": False, "loss": 100.0, "min": None, "avg": None, "max": None,
+                "family": fam, "addr": addr, "note": "超时"}
+
+    value, note = first, ""
+    if first > HIGH_LAT_MS:
+        value = None
+        for i in range(HIGH_LAT_RETRIES):
+            second, err2 = attempt()
+            if err2:
+                continue
+            if second <= HIGH_LAT_MS:
+                if proto == "tcp" and (first - second) > TCP_RETRANS_DIFF:
+                    note = "疑似 SYN 重传（首测 %.0fms → 复测 %.0fms）" % (first, second)
+                else:
+                    value = second
+                break
+        if value is None and not note:
+            note = "重试 %d 次仍 >%dms" % (HIGH_LAT_RETRIES, int(HIGH_LAT_MS))
+
+    if value is None:
+        return {"ok": False, "loss": 100.0, "min": None, "avg": None, "max": None,
+                "family": fam, "addr": addr, "note": note}
+
+    v = round(value, 1)
+    return {"ok": True, "loss": 0.0, "min": v, "avg": v, "max": v,
+            "family": fam, "addr": addr, "note": note}
+
+
+def tcping(host, port, attempts=1, timeout=None, family="auto"):
+    """兼容旧调用的薄封装：attempts>1 时重复 probe_once 做统计（正常路径不用）。"""
+    results = [probe_once(host, port, "tcp", family, timeout) for _ in range(max(1, int(attempts)))]
+    return _merge(results)
+
+
+def icmp_ping(host, attempts=1, timeout=None, family="4"):
+    results = [probe_once(host, 0, "icmp", family, timeout) for _ in range(max(1, int(attempts)))]
+    return _merge(results)
+
+
+def _merge(results):
+    oks = [r for r in results if r["ok"]]
+    loss = round(100.0 * (len(results) - len(oks)) / max(1, len(results)), 1)
+    if not oks:
+        return {"ok": False, "loss": 100.0, "min": None, "avg": None, "max": None,
+                "family": results[0]["family"] if results else "auto"}
+    vals = [r["avg"] for r in oks]
+    return {"ok": True, "loss": loss, "min": min(vals), "avg": round(sum(vals) / len(vals), 1),
+            "max": max(vals), "family": oks[0]["family"]}
 
 
 def _icmp_checksum(data):
@@ -344,14 +448,11 @@ def run_checks(targets):
         host = t.get("host") or ""
         if not host:
             continue
-        if proto == "icmp":
-            res = icmp_ping(host, family=t.get("family", "4"))
-            port = None
-        else:
-            res = tcping(host, t.get("port", 80), family=t.get("family", "auto"))
-            port = int(t.get("port") or 80)
+        port = None if proto == "icmp" else int(t.get("port") or 80)
+        res = probe_once(host, port or 0, proto, t.get("family", "auto"))
         out.append({"name": name, "proto": proto, "host": host, "port": port,
                     "family": res.get("family", t.get("family", "auto")),
+                    "addr": res.get("addr"), "note": res.get("note", ""),
                     "ok": res["ok"], "loss": res["loss"],
                     "min": res["min"], "avg": res["avg"], "max": res["max"]})
     return out
@@ -413,6 +514,7 @@ class Sampler:
             self.last_checks = run_checks(self.cfg.get("targets"))
             self.last_checks_ts = now
         payload["checks"] = self.last_checks or []
+        payload["checks_ts"] = int(self.last_checks_ts) if self.last_checks else 0
         return payload
 
 

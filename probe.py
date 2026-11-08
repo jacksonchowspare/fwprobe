@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.3.5"
+VERSION = "0.3.6"
 APP_NAME = "fwprobe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -285,11 +285,14 @@ class Store:
                  (payload.get("conn") or {}).get("tcp"), (payload.get("conn") or {}).get("estab"),
                  (payload.get("conn") or {}).get("udp"),
                  payload.get("procs"), payload.get("uptime")))
+            cts = int(payload.get("checks_ts") or 0) or ts
+            if abs(cts - now) > 600:
+                cts = ts                      # 补发/时钟漂移，拉回本次上报时刻
             for c in (payload.get("checks") or []):
                 self.conn.execute(
                     "INSERT OR REPLACE INTO checks(node_id,ts,name,proto,host,port,family,ok,loss,rmin,ravg,rmax)"
                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (node["id"], ts, (c.get("name") or "?")[:32], c.get("proto"), c.get("host"),
+                    (node["id"], cts, (c.get("name") or "?")[:32], c.get("proto"), c.get("host"),
                      c.get("port"), c.get("family"), 1 if c.get("ok") else 0,
                      c.get("loss"), c.get("min"), c.get("avg"), c.get("max")))
             self.conn.execute(
@@ -353,7 +356,7 @@ class Store:
         return rx, tx
 
     def check_hist(self, nid, n=20):
-        """每条探测线路最近 n 次的原始结果（旧→新），供卡片 20 格滚动历史条。"""
+        """每条探测线路最近 n 次的原始结果（旧→新），供详情页/调试用。"""
         with self.lock:
             rows = self.conn.execute(
                 "SELECT ts,name,ok,loss,rmin,ravg FROM checks WHERE node_id=? ORDER BY ts DESC LIMIT ?",
@@ -364,6 +367,69 @@ class Store:
                 "ts": r["ts"], "ok": r["ok"], "loss": r["loss"],
                 "min": r["rmin"], "avg": r["ravg"]})
         return {k: v[-n:] for k, v in out.items()}
+
+    def three(self, nid, window=None, buckets=None):
+        """三网展示口径（对齐 Komari Glassmorphism 主题）：
+
+        最近 1 小时均分成 20 格（每格 3 分钟）；每格延迟 = 格内成功测量的平均值，
+        丢包 = 格内丢包次数 / 总次数 ×100；大数字 = 整段窗口的平均延迟与平均丢包。
+        没有数据的格子给 None（前端画灰）。
+        """
+        window = int(window or THREE_WINDOW)
+        buckets = int(buckets or THREE_BUCKETS)
+        now = int(time.time())
+        start = now - window
+        size = window / float(buckets)
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT ts,name,ok,loss,rmin,ravg FROM checks"
+                " WHERE node_id=? AND ts>=? ORDER BY ts", (nid, start)).fetchall()
+        acc = {}
+        for r in rows:
+            name = r["name"]
+            e = acc.get(name)
+            if e is None:
+                e = acc[name] = {"lat_sum": 0.0, "lat_n": 0, "total": 0, "lost": 0,
+                                 "b": [None] * buckets}
+            idx = int((r["ts"] - start) / size)
+            idx = min(max(idx, 0), buckets - 1)
+            b = e["b"][idx]
+            if b is None:
+                b = e["b"][idx] = {"ts": int(start + idx * size),
+                                   "lat_sum": 0.0, "lat_n": 0, "total": 0, "lost": 0}
+            val = r["rmin"] if r["rmin"] is not None else r["ravg"]
+            ok = bool(r["ok"]) and val is not None
+            b["total"] += 1
+            e["total"] += 1
+            if ok:
+                b["lat_sum"] += val
+                b["lat_n"] += 1
+                e["lat_sum"] += val
+                e["lat_n"] += 1
+            else:
+                b["lost"] += 1
+                e["lost"] += 1
+
+        out = {}
+        for name, e in acc.items():
+            bl = []
+            for b in e["b"]:
+                if not b or not b["total"]:
+                    bl.append(None)
+                    continue
+                bl.append({
+                    "ts": b["ts"],
+                    "latency": round(b["lat_sum"] / b["lat_n"], 1) if b["lat_n"] else None,
+                    "loss": round(100.0 * b["lost"] / b["total"], 1),
+                })
+            out[name] = {
+                "name": name,
+                "avg_latency": round(e["lat_sum"] / e["lat_n"], 1) if e["lat_n"] else None,
+                "avg_loss": round(100.0 * e["lost"] / e["total"], 1) if e["total"] else None,
+                "samples": e["total"],
+                "buckets": bl,
+            }
+        return {"window": window, "bucket_seconds": int(size), "targets": out}
 
     def spark(self, nid, n=24):
         """最近 n 个采样点的上/下行速率（卡片点线走势用，省一次请求）"""
@@ -435,6 +501,9 @@ class Store:
 
 
 # --------------------------------------------------------------------------- 工具
+THREE_WINDOW = 3600        # 三网展示窗口：最近 1 小时
+THREE_BUCKETS = 20         # 20 格 → 每格 3 分钟（对齐 Komari Glassmorphism 主题）
+
 COUNTRY_CACHE = {}
 COUNTRY_DONE = set()
 
@@ -503,7 +572,7 @@ def public_summary(store: Store):
             "used_bytes": rx + tx,
             "rx_total": rx, "tx_total": tx,
             "spark": store.spark(n["id"], 24),
-            "hist": store.check_hist(n["id"], 20),
+            "three": store.three(n["id"]),        # 1 小时 / 20 格（每格 3 分钟），Komari 主题口径
             "sample": s, "checks": checks,
         })
     return {"version": VERSION, "now": now, "offline_after": OFFLINE_AFTER, "nodes": out}
