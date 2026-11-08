@@ -13,12 +13,18 @@
     /* 三网 5 档（Komari Glassmorphism 口径）：延迟 ≤60/100/160/200，丢包 ≤1/3/6/9% */
     --t1:#059669; --t2:#22c55e; --t3:#a3e635; --t4:#facc15; --t5:#f43f5e;
   }
+  /* 白天模式：柔和纸张灰蓝 —— 底色/卡片都不走纯白，整体亮度降一档（4K 屏久看不刺眼） */
   body[data-theme="light"]{
-    --bg:#eef2f7; --card:rgba(255,255,255,.88); --solid:#ffffff; --border:rgba(15,23,42,.12);
-    --text:#0f172a; --muted:#64748b; --accent:#2f6ff0; --ok:#16a34a; --warn:#b45309; --bad:#dc2626;
+    --bg:#e4e8ed; --card:rgba(244,246,248,.90); --solid:#f4f6f8; --border:rgba(15,23,42,.11);
+    --text:#1c2531; --muted:#5d6875; --accent:#2f6ff0; --ok:#15803d; --warn:#a16207; --bad:#c0392b;
     --track:rgba(15,23,42,.10); --hover:rgba(15,23,42,.05);
-    --shadow:0 6px 18px rgba(15,23,42,.08);
+    --shadow:0 6px 18px rgba(15,23,42,.07), inset 0 1px 0 rgba(255,255,255,.55);
     --t1:#047857; --t2:#16a34a; --t3:#65a30d; --t4:#ca8a04; --t5:#e11d48;
+    /* 光晕减半：原来的 16% / 10% 在浅底上等于给整页加了一层高光 */
+    background:
+      radial-gradient(900px 500px at 8% -10%, rgba(61,139,253,.08), transparent 60%),
+      radial-gradient(700px 420px at 100% 0%, rgba(34,197,94,.05), transparent 55%), var(--bg);
+    background-attachment:fixed;
   }
   *{box-sizing:border-box}
   body{
