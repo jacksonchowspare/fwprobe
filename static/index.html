@@ -5,140 +5,511 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fwprobe · 节点状态</title>
 <style>
-  :root {
-    --bg: #0b0f14;
-    --card: rgba(26, 33, 43, .72);
-    --border: rgba(255, 255, 255, .10);
-    --text: #e6edf3;
-    --muted: #8b98a9;
-    --accent: #4da3ff;
-    --ok: #34d399;
-    --bad: #f87171;
+  :root{
+    --bg:#0b0f14; --card:rgba(26,33,43,.72); --solid:#141b23; --border:rgba(255,255,255,.10);
+    --text:#e6edf3; --muted:#8b98a9; --accent:#4da3ff; --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
+    --track:rgba(255,255,255,.10); --hover:rgba(255,255,255,.06);
+    --shadow:0 4px 20px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.04);
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 28px 18px 60px;
-    font: 14px/1.6 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
-    color: var(--text);
+  body[data-theme="light"]{
+    --bg:#eef2f7; --card:rgba(255,255,255,.88); --solid:#ffffff; --border:rgba(15,23,42,.12);
+    --text:#0f172a; --muted:#64748b; --accent:#2f6ff0; --ok:#16a34a; --warn:#b45309; --bad:#dc2626;
+    --track:rgba(15,23,42,.10); --hover:rgba(15,23,42,.05);
+    --shadow:0 6px 18px rgba(15,23,42,.08);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:26px 18px 60px;color:var(--text);
+    font:14px/1.55 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
     background:
-      radial-gradient(900px 500px at 10% -10%, rgba(61,139,253,.16), transparent 60%),
-      radial-gradient(700px 400px at 100% 0%, rgba(34,197,94,.10), transparent 55%),
-      var(--bg);
-    background-attachment: fixed;
+      radial-gradient(900px 500px at 8% -10%, rgba(61,139,253,.16), transparent 60%),
+      radial-gradient(700px 420px at 100% 0%, rgba(34,197,94,.10), transparent 55%), var(--bg);
+    background-attachment:fixed;overflow-x:hidden;
   }
-  .wrap { max-width: 1080px; margin: 0 auto; }
-  header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
-  h1 { font-size: 19px; margin: 0; letter-spacing: .3px; }
-  .ver { color: var(--muted); font-size: 12px; }
-  .meta { margin-left: auto; color: var(--muted); font-size: 12px; }
-  .card {
-    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    box-shadow: 0 4px 20px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.04);
-    padding: 16px 18px; margin-bottom: 14px;
+  .wrap{max-width:1280px;margin:0 auto}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+  h1{font-size:19px;margin:0;letter-spacing:.3px}
+  .ver{color:var(--muted);font-size:12px}
+  .top-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
+    border-radius:8px;padding:6px 11px;cursor:pointer;transition:background .16s,border-color .16s}
+  button:hover{background:rgba(77,163,255,.14);border-color:rgba(77,163,255,.45)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(390px,1fr));gap:16px}
+  .card{
+    background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px 14px;
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:var(--shadow);
+    cursor:pointer;transition:transform .16s,border-color .16s;
   }
-  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-  .dot.on { background: var(--ok); box-shadow: 0 0 8px rgba(52,211,153,.8); }
-  .dot.off { background: var(--bad); }
-  .alias { font-weight: 600; }
-  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
-  .k { color: var(--muted); font-size: 11px; }
-  .v { font-variant-numeric: tabular-nums; }
-  .lat { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 12px; font-size: 12px; color: var(--muted); }
-  .lat b { color: var(--text); font-weight: 600; }
-  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
-  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 26px; }
-  code { background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 4px; }
+  .card:hover{transform:translateY(-2px);border-color:rgba(77,163,255,.45)}
+  .head{display:flex;align-items:center;gap:8px}
+  .flag{font-size:17px;line-height:1}
+  .alias{font-weight:650;font-size:15.5px;letter-spacing:.2px}
+  .icons{margin-left:auto;display:flex;align-items:center;gap:4px}
+  .ico{width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;
+    background:transparent;border:1px solid transparent;border-radius:7px;color:var(--muted)}
+  .ico:hover{color:var(--text);background:var(--hover);border-color:var(--border)}
+  .ico svg{width:16px;height:16px;display:block}
+  .tags{display:flex;align-items:center;gap:6px;margin:8px 0 12px;flex-wrap:wrap}
+  .tag{font-size:11px;padding:1.5px 8px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
+  .tag.v4{color:#60a5fa;border-color:rgba(96,165,250,.45)}
+  .tag.v6{color:#a78bfa;border-color:rgba(167,139,250,.45)}
+  .tag.on{color:var(--ok);border-color:rgba(52,211,153,.45)}
+  .tag.off{color:var(--bad);border-color:rgba(248,113,113,.45)}
+  .grid4{display:grid;grid-template-columns:1fr 1fr;gap:12px 18px}
+  .cell .k{color:var(--muted);font-size:11.5px;display:flex;justify-content:space-between;gap:8px}
+  .cell .v{font-variant-numeric:tabular-nums;font-weight:600;font-size:14px}
+  .cell .u{color:var(--muted);font-weight:400;font-size:11px}
+  .bar{height:7px;margin-top:6px;border-radius:3px;overflow:hidden;
+    background:repeating-linear-gradient(90deg,var(--track) 0 5px,transparent 5px 8px)}
+  .bar i{display:block;height:100%;border-radius:3px;
+    background:repeating-linear-gradient(90deg,var(--accent) 0 5px,transparent 5px 8px)}
+  .bar i.warn{background:repeating-linear-gradient(90deg,var(--warn) 0 5px,transparent 5px 8px)}
+  .bar i.bad{background:repeating-linear-gradient(90deg,var(--bad) 0 5px,transparent 5px 8px)}
+  .io{display:grid;grid-template-columns:1fr 1fr;gap:10px 18px;margin-top:14px}
+  .io .row{display:flex;align-items:center;gap:6px;font-size:12px}
+  .io .arrow{color:var(--muted)}
+  .io .num{font-variant-numeric:tabular-nums;font-weight:650}
+  .io .num.ok{color:var(--ok)} .io .num.bad{color:var(--warn)}
+  .io .real{font-size:10.5px;color:var(--muted);margin-left:auto}
+  .spark{width:100%;height:16px;display:block;margin-top:3px;opacity:.9}
+  .kvline{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-top:11px}
+  .kvline b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .lat{margin-top:11px;border-top:1px dashed var(--border);padding-top:9px;display:flex;flex-direction:column;gap:6px}
+  .lat .r{display:grid;grid-template-columns:46px 1fr 58px 34px;align-items:center;gap:8px;font-size:12px}
+  .lat .name{color:var(--muted)}
+  .lat .ms{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  .lat .ms.ok{color:var(--ok)} .lat .ms.warn{color:var(--warn)} .lat .ms.bad{color:var(--bad)}
+  .lat .track{height:6px;border-radius:3px;background:var(--track);overflow:hidden}
+  .lat .track i{display:block;height:100%}
+  .lat .loss{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+  .foot{display:flex;align-items:center;gap:14px;margin-top:11px;border-top:1px dashed var(--border);
+    padding-top:9px;font-size:12px;color:var(--muted)}
+  .foot b{color:var(--text);font-weight:600}
+  .empty{color:var(--muted);text-align:center;padding:46px 0}
+  footer{color:var(--muted);font-size:12px;text-align:center;margin-top:26px}
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;
+    align-items:center;justify-content:center;z-index:90;padding:18px}
+  .mask.show{display:flex}
+  .modal{background:var(--solid);border:1px solid var(--border);border-radius:14px;width:min(560px,100%);
+    max-height:86vh;overflow:auto;box-shadow:0 18px 50px rgba(0,0,0,.45);padding:18px 20px}
+  .modal h3{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .modal .sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+  .modal .rows{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}
+  .modal .rows div{font-size:12px;color:var(--muted)}
+  .modal .rows b{display:block;color:var(--text);font-size:13.5px;font-weight:600;margin-top:2px}
+  .modal.rows .kv{display:flex;justify-content:space-between;gap:12px;align-items:baseline;
+    font-size:12.5px;color:var(--muted);padding:3px 0;border-bottom:1px dashed var(--border)}
+  .modal.rows .kv:last-child{border-bottom:0}
+  .modal.rows .kv b{display:inline;font-size:12.5px;margin:0;color:var(--text);font-weight:600}
+  .close{margin-left:auto}
+  #detail{display:none}
+  #detail.show{display:block}
+  .dhead{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+  .dhead h2{margin:0;font-size:17px}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
+  .chart .t{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between}
+  .chart canvas{width:100%;height:110px;display:block}
+  @media (max-width:860px){
+    .grid{grid-template-columns:1fr}
+    .charts{grid-template-columns:1fr}
+    body{padding:16px 12px 50px}
+    .lat .r{grid-template-columns:42px 1fr 54px 30px}
+  }
 </style>
 </head>
-<body>
+<body data-theme="dark">
 <div class="wrap">
   <header>
     <h1>fwprobe · 节点状态</h1>
     <span class="ver" id="ver"></span>
-    <span class="meta" id="meta"></span>
+    <div class="top-actions">
+      <span class="ver" id="meta"></span>
+      <button id="theme_btn" onclick="toggleTheme()">白天模式</button>
+    </div>
   </header>
-  <div id="nodes"><div class="card empty">加载中…</div></div>
-  <footer>数据来源：各节点 agent 主动上报 · 超过 <span id="offline_after">120</span> 秒无上报判定离线</footer>
+
+  <div id="detail">
+    <div class="dhead">
+      <button onclick="closeDetail()">← 返回</button>
+      <h2 id="d_title"></h2>
+      <span class="ver" id="d_sub"></span>
+      <div class="top-actions">
+        <button onclick="setRange(1)">1 小时</button>
+        <button onclick="setRange(24)">24 小时</button>
+        <button onclick="setRange(168)">7 天</button>
+      </div>
+    </div>
+    <div class="charts">
+      <div class="chart"><div class="t"><span>CPU 使用率</span><span id="c_cpu"></span></div><canvas id="ch_cpu"></canvas></div>
+      <div class="chart"><div class="t"><span>内存占用</span><span id="c_mem"></span></div><canvas id="ch_mem"></canvas></div>
+      <div class="chart"><div class="t"><span>网络（上行 / 下行）</span><span id="c_net"></span></div><canvas id="ch_net"></canvas></div>
+      <div class="chart"><div class="t"><span>三网时延</span><span id="c_lat"></span></div><canvas id="ch_lat"></canvas></div>
+    </div>
+    <div class="chart" style="margin-top:14px">
+      <div class="t"><span>系统信息</span></div>
+      <div class="modal rows" id="d_sys" style="background:transparent;border:0;padding:0;box-shadow:none;max-height:none"></div>
+    </div>
+  </div>
+
+  <div class="grid" id="nodes"><div class="empty">加载中…</div></div>
+  <footer>数据来源：各节点 agent 主动上报 · 超过 <span id="oa">120</span> 秒无上报判定离线</footer>
+</div>
+
+<div class="mask" id="mask" onclick="if(event.target===this)closeQuick()">
+  <div class="modal" id="quick"></div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 
-function fmtBytes(n) {
-  if (n === null || n === undefined) return "-";
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0, v = Number(n);
+const fmtBytes = n => {
+  if (n === null || n === undefined || isNaN(n)) return "-";
+  if (n === 0) return "0 B";
+  const u = ["B","KB","MB","GB","TB","PB"]; let i = 0, v = Number(n);
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return (v >= 100 ? Math.round(v) : v.toFixed(1)) + " " + u[i];
-}
-
-function fmtSpeed(n) { return (n === null || n === undefined) ? "-" : fmtBytes(n) + "/s"; }
-
-function pct(used, total) {
-  if (!total) return "-";
-  return (100 * used / total).toFixed(1) + "%";
-}
-
-function ago(ts) {
+  return (v >= 100 ? Math.round(v) : v.toFixed(v >= 10 ? 1 : 2)) + " " + u[i];
+};
+const fmtSpeed = n => (n === null || n === undefined) ? "-" : fmtBytes(n) + "/s";
+const fmtPct = v => (v === null || v === undefined) ? "-" : (v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "%";
+const fmtDur = s => {
+  if (!s) return "-";
+  if (s < 60) return s + " 秒";
+  if (s < 3600) return Math.floor(s / 60) + " 分钟";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时 " + Math.floor(s % 3600 / 60) + " 分";
+  return Math.floor(s / 86400) + " 天 " + Math.floor(s % 86400 / 3600) + " 小时";
+};
+const ago = ts => {
   if (!ts) return "从未上报";
   const d = Math.max(0, Math.floor(Date.now() / 1000) - ts);
   if (d < 60) return d + " 秒前";
   if (d < 3600) return Math.floor(d / 60) + " 分钟前";
   if (d < 86400) return Math.floor(d / 3600) + " 小时前";
   return Math.floor(d / 86400) + " 天前";
+};
+const flag = cc => {
+  if (!cc || cc.length !== 2 || !/^[A-Za-z]{2}$/.test(cc)) return "🌐";
+  const A = 0x1F1E6;
+  return String.fromCodePoint(A + cc.toUpperCase().charCodeAt(0) - 65,
+                              A + cc.toUpperCase().charCodeAt(1) - 65);
+};
+
+/* 单色 OS 图标（stroke 跟随主题） */
+const OS_ICONS = {
+  debian: "M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm4.8 12.6c-1.2 1.7-3.8 2.4-5.7 1.7 2.1-.4 3.1-1.2 3.7-2.1.6-.9.4-1.9.4-1.9.6 1 .9 1.6 1.6 2.3zM7.4 9.6c.3-.9 1-1.6 1.9-1.9",
+  ubuntu: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm0 3.4a5.6 5.6 0 1 1 0 11.2 5.6 5.6 0 0 1 0-11.2zM3.4 10.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6zm17.2-3.7a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6z",
+  centos: "M12 2.6 4 7v10l8 4.4 8-4.4V7l-8-4.4zm0 4 4.5 2.5v5.8L12 17.4l-4.5-2.5V9.1L12 6.6z",
+  fedora: "M12 2.5C6.8 2.5 2.5 6.8 2.5 12S6.8 21.5 12 21.5s9.5-4.3 9.5-9.5S17.2 2.5 12 2.5zm2.9 5.9c-.4-.9-1.2-1.5-2.3-1.5-1.4 0-2.4 1-2.4 2.5v1h2.5v1.9H9.4",
+  arch: "M12 2 3 21h3.3l2-4.5h7.4l2 4.5H21L12 2zm0 6.2 2.3 5.2H9.7L12 8.2z",
+  alpine: "M3 20h18L12 5 3 20zm6.2-3 2.8-6.3 2.8 6.3H9.2z",
+  rocky: "M4 6l8-3 8 3v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zm4 3.6v2h8v-2H8z",
+  alma: "M12 2 3 7v10l9 5 9-5V7l-9-5zm0 3.8 5.2 2.9v6.6L12 18.2 6.8 15.3V8.7L12 5.8z",
+  almalinux: "M12 2 3 7v10l9 5 9-5V7l-9-5zm0 3.8 5.2 2.9v6.6L12 18.2 6.8 15.3V8.7L12 5.8z",
+  rhel: "M4 8c0-2 2-3 4-3h8c2 0 4 1 4 3v8c0 2-2 3-4 3H8c-2 0-4-1-4-3V8zm4 3v2h8v-2H8z",
+  opensuse: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm0 3.6a5.4 5.4 0 1 1 0 10.8 5.4 5.4 0 0 1 0-10.8zm0 2.6a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z",
+  alpine_linux: "M3 20h18L12 5 3 20z",
+  linux: "M12 2a3 3 0 0 1 3 3v4c0 1 .5 1.8 1.4 2.8C18 13.4 19 15.6 19 17a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3c0-1.4 1-3.6 2.6-5.2C8.5 10.8 9 10 9 9V5a3 3 0 0 1 3-3z"
+};
+function osIcon(id) {
+  const key = (id || "").toLowerCase();
+  const path = OS_ICONS[key] || OS_ICONS.linux;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+    stroke-linecap="round" stroke-linejoin="round"><path d="${path}"/></svg>`;
 }
+function bar(pct, cls) {
+  const w = Math.max(0, Math.min(100, pct || 0));
+  return `<div class="bar"><i class="${cls || ''}" style="width:${w.toFixed(1)}%"></i></div>`;
+}
+const level = v => v >= 95 ? "bad" : (v >= 85 ? "warn" : "");
+function spark(data, color) {
+  const w = 100, h = 16, n = (data || []).length;
+  if (!n) return `<svg class="spark" viewBox="0 0 ${w} ${h}"></svg>`;
+  const max = Math.max(1, ...data);
+  const pt = (v, i) => [i / Math.max(1, n - 1) * w, h - 2 - (v / max) * (h - 4)];
+  const pts = data.map((v, i) => pt(v, i).map(x => x.toFixed(2)).join(",")).join(" ");
+  const dots = data.map((v, i) => {
+    const [x, y] = pt(v, i);
+    return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="0.9" fill="${color}" opacity=".85"/>`;
+  }).join("");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1" opacity=".45"/>${dots}</svg>`;
+}
+const LAT_COLOR = ms => ms == null ? "var(--muted)" : (ms < 90 ? "var(--ok)" : (ms < 180 ? "var(--warn)" : "var(--bad)"));
+const LAT_CLASS = ms => ms == null ? "" : (ms < 90 ? "ok" : (ms < 180 ? "warn" : "bad"));
+const latW = ms => ms == null ? 0 : Math.max(3, Math.min(100, ms / 2.6));
+
+let NODES = [], OFFLINE_AFTER = 120;
 
 function card(n) {
   const s = n.sample || {};
-  const mem = s.mem_used != null ? pct(s.mem_used, s.mem_total) : "-";
-  const disk = s.disk_used != null ? pct(s.disk_used, s.disk_total) : "-";
-  const checks = (n.checks || []).filter(c => c.ok !== null).map(c => {
-    const v = c.ok ? (c.ravg != null ? c.ravg.toFixed(0) + " ms" : "-") : "失败";
-    return `<span>${c.name} <b>${v}</b>${c.loss ? ` <span style="color:var(--bad)">${c.loss}%</span>` : ""}</span>`;
+  const memPct = s.mem_total ? 100 * s.mem_used / s.mem_total : 0;
+  const diskPct = s.disk_total ? 100 * s.disk_used / s.disk_total : 0;
+  const cpuPct = s.cpu || 0;
+  const quota = n.quota_bytes || 0, used = n.used_bytes || 0;
+  const quotaPct = quota ? Math.min(100, 100 * used / quota) : 0;
+  const fam = (n.checks || []).some(c => String(c.family) === "6") ? "v6" : "v4";
+  const lat = (n.checks || []).map(c => {
+    const ms = c.ok ? c.ravg : null;
+    return `<div class="r">
+      <span class="name">${String(c.name).replace("上海", "")}</span>
+      <span class="track"><i style="width:${latW(ms).toFixed(1)}%;background:${LAT_COLOR(ms)}"></i></span>
+      <span class="ms ${LAT_CLASS(ms)}">${ms == null ? "超时" : Math.round(ms) + " ms"}</span>
+      <span class="loss">${(c.loss || 0).toFixed(0)}%</span>
+    </div>`;
   }).join("");
-  return `
-  <div class="card">
-    <div class="row">
-      <span class="dot ${n.online ? "on" : "off"}"></span>
+  return `<div class="card" onclick="openDetail('${n.id}')">
+    <div class="head">
+      <span class="flag">${flag(n.country)}</span>
       <span class="alias">${n.alias || n.id}</span>
+      <span class="icons">
+        <button class="ico" title="${n.os_name || n.os_id || 'Linux'}" onclick="event.stopPropagation()">${osIcon(n.os_id)}</button>
+        <button class="ico" title="快速详情" onclick="event.stopPropagation();openQuick('${n.id}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M4 17V9M9 17V5M14 17v-6M19 17v-9M3 21h18"/></svg></button>
+      </span>
+    </div>
+    <div class="tags">
       ${n.group ? `<span class="tag">${n.group}</span>` : ""}
-      ${n.os_id ? `<span class="tag">${n.os_id}</span>` : ""}
-      <span class="tag" style="margin-left:auto">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span>
+      <span class="tag ${fam}">${fam.toUpperCase()}</span>
+      <span class="tag ${n.online ? "on" : "off"}" style="margin-left:auto">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span>
     </div>
-    <div class="grid">
-      <div><div class="k">CPU</div><div class="v">${s.cpu != null ? s.cpu.toFixed(2) + "%" : "-"}</div></div>
-      <div><div class="k">内存</div><div class="v">${mem}</div></div>
-      <div><div class="k">磁盘</div><div class="v">${disk}</div></div>
-      <div><div class="k">负载</div><div class="v">${s.load1 != null ? s.load1.toFixed(2) : "-"}</div></div>
-      <div><div class="k">下行</div><div class="v">${fmtSpeed(s.rx_bps)}</div></div>
-      <div><div class="k">上行</div><div class="v">${fmtSpeed(s.tx_bps)}</div></div>
-      <div><div class="k">TCP</div><div class="v">${s.tcp != null ? s.tcp : "-"}</div></div>
-      <div><div class="k">UDP</div><div class="v">${s.udp != null ? s.udp : "-"}</div></div>
+    <div class="grid4">
+      <div class="cell"><div class="k"><span>CPU</span><span>${s.cpu_cores || "-"} 核</span></div>
+        <div class="v">${fmtPct(s.cpu)}</div>${bar(cpuPct, level(cpuPct))}</div>
+      <div class="cell"><div class="k"><span>内存</span><span class="u">${fmtBytes(s.mem_used)} / ${fmtBytes(s.mem_total)}</span></div>
+        <div class="v">${fmtPct(memPct)}</div>${bar(memPct, level(memPct))}</div>
+      <div class="cell"><div class="k"><span>磁盘</span><span class="u">${fmtBytes(s.disk_used)} / ${fmtBytes(s.disk_total)}</span></div>
+        <div class="v">${fmtPct(diskPct)}</div>${bar(diskPct, level(diskPct))}</div>
+      <div class="cell"><div class="k"><span>负载</span><span class="u">1 分钟</span></div>
+        <div class="v">${s.load1 == null ? "-" : Number(s.load1).toFixed(2)}</div>
+        ${bar(Math.min(100, (s.load1 || 0) / Math.max(1, s.cpu_cores || 1) * 100),
+              (s.load1 || 0) >= (s.cpu_cores || 1) ? "warn" : "")}</div>
     </div>
-    <div class="lat">${checks || '<span>暂无探测数据</span>'}</div>
+    <div class="io">
+      <div>
+        <div class="row"><span class="arrow">↑ 上行</span><span class="num ok">${fmtSpeed(s.tx_bps)}</span>
+          <span class="real">实时</span></div>
+        ${spark((n.spark || {}).tx || [], "#34d399")}
+      </div>
+      <div>
+        <div class="row"><span class="arrow">↓ 下行</span><span class="num bad">${fmtSpeed(s.rx_bps)}</span>
+          <span class="real">实时</span></div>
+        ${spark((n.spark || {}).rx || [], "#fbbf24")}
+      </div>
+    </div>
+    <div class="kvline"><span>出站 <b>${fmtBytes(n.tx_total)}</b></span><span>入站 <b>${fmtBytes(n.rx_total)}</b></span></div>
+    <div class="cell" style="margin-top:10px">
+      <div class="k"><span>流量</span><span class="u">${fmtBytes(used)} / ${quota ? fmtBytes(quota) : "不限量"}</span></div>
+      ${quota ? bar(quotaPct, quotaPct > 90 ? "bad" : (quotaPct > 75 ? "warn" : "")) : ""}
+    </div>
+    <div class="kvline"><span>TCP 连接 <b>${s.tcp == null ? "-" : s.tcp}</b></span>
+      <span>UDP 连接 <b>${s.udp == null ? "-" : s.udp}</b></span></div>
+    <div class="lat">${lat || '<div class="r"><span class="name">探测</span><span class="track"></span><span class="ms">-</span><span class="loss">-</span></div>'}</div>
+    <div class="foot">
+      <span>在线 <b>${n.online ? fmtDur(s.uptime) : "-"}</b></span>
+      <span>到期 <b>${n.expires_at || "—"}</b></span>
+      <span style="margin-left:auto">${n.os_id || ""}</span>
+    </div>
   </div>`;
 }
 
-async function load() {
+function renderSummary() {
+  const list = NODES || [];
+  $("meta").textContent = `${list.filter(n => n.online).length}/${list.length} 在线`;
+  $("nodes").innerHTML = list.length ? list.map(card).join("")
+    : `<div class="empty">还没有节点：在中心执行 probe.py addnode 后用生成的命令装 agent。</div>`;
+}
+
+async function loadSummary() {
   try {
     const r = await fetch("/api/public/summary", { cache: "no-store" });
     const d = await r.json();
+    NODES = d.nodes || [];
+    OFFLINE_AFTER = d.offline_after || 120;
     $("ver").textContent = "v" + (d.version || "");
-    $("offline_after").textContent = d.offline_after || 120;
-    const list = d.nodes || [];
-    $("meta").textContent = `${list.filter(n => n.online).length}/${list.length} 在线`;
-    $("nodes").innerHTML = list.length ? list.map(card).join("")
-      : `<div class="card empty">还没有节点。在中心添加节点后，用生成的命令安装 agent。</div>`;
+    $("oa").textContent = OFFLINE_AFTER;
+    renderSummary();
   } catch (e) {
-    $("nodes").innerHTML = `<div class="card empty">加载失败：${e.message}</div>`;
+    $("nodes").innerHTML = `<div class="empty">加载失败：${e.message}</div>`;
   }
 }
 
-load();
-setInterval(load, 10000);
+function openQuick(id) {
+  const n = (NODES || []).find(x => x.id === id);
+  if (!n) return;
+  const s = n.sample || {};
+  const rows = [
+    ["别名", n.alias], ["分组", n.group || "—"], ["系统", n.os_name || n.os_id || "—"],
+    ["状态", n.online ? "在线" : "离线（" + ago(n.last_seen) + "）"],
+    ["CPU", fmtPct(s.cpu) + (s.cpu_cores ? " / " + s.cpu_cores + " 核" : "")],
+    ["内存", fmtBytes(s.mem_used) + " / " + fmtBytes(s.mem_total)],
+    ["磁盘", fmtBytes(s.disk_used) + " / " + fmtBytes(s.disk_total)],
+    ["负载", s.load1 == null ? "—" : Number(s.load1).toFixed(2)],
+    ["上行", fmtSpeed(s.tx_bps)], ["下行", fmtSpeed(s.rx_bps)],
+    ["TCP", s.tcp == null ? "—" : s.tcp], ["UDP", s.udp == null ? "—" : s.udp],
+    ["出站累计", fmtBytes(n.tx_total)], ["入站累计", fmtBytes(n.rx_total)],
+    ["配额", n.quota_bytes ? fmtBytes(n.quota_bytes) : "不限"], ["到期", n.expires_at || "—"],
+    ["运行时长", fmtDur(s.uptime)], ["Agent", n.agent_ver || "—"]
+  ];
+  const lat = (n.checks || []).map(c => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;color:var(--muted)">
+      <span>${c.name}</span><b style="color:${LAT_COLOR(c.ok ? c.ravg : null)}">${c.ok ? Math.round(c.ravg) + " ms" : "超时"}</b></div>`).join("");
+  $("quick").innerHTML = `
+    <h3>${flag(n.country)} ${n.alias}<button class="ico close" onclick="closeQuick()">✕</button></h3>
+    <div class="sub">${n.os_name || n.os_id || ""} · ${n.online ? "在线" : "离线"}</div>
+    <div class="rows">${rows.map(r => `<div>${r[0]}<b>${r[1]}</b></div>`).join("")}</div>
+    <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:10px">${lat}</div>
+    <div style="margin-top:14px"><button onclick="closeQuick();openDetail('${n.id}')">查看完整详情</button></div>`;
+  $("mask").classList.add("show");
+}
+function closeQuick() { $("mask").classList.remove("show"); }
+
+let CUR = null, RANGE = 24, DETAIL_TIMER = null;
+
+function openDetail(id) { location.hash = "#/node/" + id; }
+function closeDetail() { location.hash = ""; }
+
+function drawLine(canvasId, series, opts) {
+  const c = $(canvasId); if (!c) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth || 300, h = c.clientHeight || 110;
+  c.width = Math.floor(w * dpr); c.height = Math.floor(h * dpr);
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const pts = (series || []).filter(p => p.v != null && isFinite(p.v));
+  if (!pts.length) {
+    ctx.fillStyle = "#8b98a9"; ctx.font = "12px sans-serif"; ctx.fillText("暂无数据", 8, h / 2);
+    return;
+  }
+  const max = Math.max(...pts.map(p => p.v), opts.min || 1);
+  const pad = 6;
+  ctx.beginPath();
+  pts.forEach((p, i) => {
+    const x = pad + (i / Math.max(1, pts.length - 1)) * (w - pad * 2);
+    const y = h - pad - (p.v / max) * (h - pad * 2);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = opts.color || "#4da3ff"; ctx.lineWidth = 1.6; ctx.stroke();
+  ctx.lineTo(w - pad, h - pad); ctx.lineTo(pad, h - pad); ctx.closePath();
+  ctx.fillStyle = opts.fill || "rgba(77,163,255,.14)"; ctx.fill();
+}
+
+function drawMulti(canvasId, groups, opts) {
+  const c = $(canvasId); if (!c) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth || 300, h = c.clientHeight || 110;
+  c.width = Math.floor(w * dpr); c.height = Math.floor(h * dpr);
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const all = [];
+  groups.forEach(g => (g.points || []).forEach(p => { if (p.v != null && isFinite(p.v)) all.push(p.v); }));
+  if (!all.length) {
+    ctx.fillStyle = "#8b98a9"; ctx.font = "12px sans-serif"; ctx.fillText("暂无数据", 8, h / 2);
+    return;
+  }
+  const max = Math.max(...all, opts.min || 1);
+  const pad = 6;
+  groups.forEach(g => {
+    const pts = (g.points || []).filter(p => p.v != null && isFinite(p.v));
+    if (pts.length < 1) return;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const x = pad + (i / Math.max(1, pts.length - 1)) * (w - pad * 2);
+      const y = h - pad - (p.v / max) * (h - pad * 2);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = g.color; ctx.lineWidth = 1.6; ctx.stroke();
+  });
+  // 图例
+  ctx.font = "10px sans-serif";
+  let lx = pad;
+  groups.forEach(g => {
+    ctx.fillStyle = g.color;
+    ctx.fillRect(lx, 4, 6, 6);
+    ctx.fillStyle = "#8b98a9";
+    ctx.fillText(g.name, lx + 9, 10);
+    lx += 16 + ctx.measureText(g.name).width;
+  });
+}
+
+async function loadDetail() {
+  if (!CUR) return;
+  $("d_title").textContent = `${flag(CUR.country)} ${CUR.alias}`;
+  $("d_sub").textContent = `${CUR.os_name || CUR.os_id || ""} · ${CUR.online ? "在线" : "离线"}`;
+  try {
+    const r = await fetch(`/api/public/series?node=${encodeURIComponent(CUR.id)}&hours=${RANGE}`, { cache: "no-store" });
+    const d = await r.json();
+    const P = d.points || [];
+    drawLine("ch_cpu", P.map(p => ({ ts: p.ts, v: p.cpu })), { color: "#4da3ff", fill: "rgba(77,163,255,.14)", min: 20 });
+    drawLine("ch_mem", P.map(p => ({ ts: p.ts, v: p.mem_total ? 100 * p.mem / p.mem_total : null })),
+             { color: "#a78bfa", fill: "rgba(167,139,250,.16)", min: 100 });
+    const netPts = [];
+    P.forEach(p => { netPts.push({ ts: p.ts, v: p.tx }); netPts.push({ ts: p.ts, v: p.rx }); });
+    drawLine("ch_net", netPts, { color: "#34d399", fill: "rgba(52,211,153,.12)" });
+    const checks = d.checks || {};
+    const LCOL = { "上海电信": "#34d399", "上海联通": "#4da3ff", "上海移动": "#fbbf24" };
+    drawMulti("ch_lat", Object.keys(checks).map(k => ({
+      name: k.replace("上海", ""),
+      color: LCOL[k] || "#a78bfa",
+      points: (checks[k] || []).map(x => ({ ts: x.ts, v: x.avg }))
+    })), { min: 20 });
+
+    const last = P[P.length - 1] || {};
+    $("c_cpu").textContent = fmtPct(last.cpu);
+    $("c_mem").textContent = last.mem_total ? fmtPct(100 * last.mem / last.mem_total) : "-";
+    $("c_net").textContent = "↑" + fmtSpeed(last.tx) + " ↓" + fmtSpeed(last.rx);
+    const latTxt = Object.keys(checks).map(k => {
+      const arr = (checks[k] || []).filter(x => x && x.ok);
+      const x = arr[arr.length - 1];
+      return x ? `${k.replace("上海", "")} ${Math.round(x.avg)}ms` : `${k.replace("上海", "")} 超时`;
+    });
+    $("c_lat").textContent = latTxt.join(" · ");
+    const s = CUR.sample || {};
+    $("d_sys").innerHTML = [
+      ["系统", CUR.os_name || CUR.os_id || "—"], ["内核", CUR.kernel || "—"],
+      ["运行时长", fmtDur(s.uptime)], ["进程数", s.procs == null ? "—" : s.procs],
+      ["负载 1/5/15", [s.load1, s.load5, s.load15].map(v => v == null ? "-" : Number(v).toFixed(2)).join(" / ")],
+      ["网卡", s.iface || "—"], ["Agent 版本", CUR.agent_ver || "—"],
+      ["最近上报", ago(CUR.last_seen)], ["到期", CUR.expires_at || "—"],
+      ["流量配额", CUR.quota_bytes ? fmtBytes(CUR.quota_bytes) : "不限量"],
+      ["已用流量", fmtBytes(CUR.used_bytes)], ["节点 ID", CUR.id]
+    ].map(r => `<div class="kv"><span>${r[0]}</span><b>${r[1]}</b></div>`).join("");
+  } catch (e) {
+    $("d_sys").innerHTML = `<div>加载失败<b>${e.message}</b></div>`;
+  }
+}
+function setRange(h) { RANGE = h; loadDetail(); }
+
+function route() {
+  const m = (location.hash || "").match(/^#\/node\/(.+)$/);
+  if (m) {
+    CUR = (NODES || []).find(x => x.id === m[1]) || CUR;
+    $("nodes").style.display = "none";
+    $("detail").classList.add("show");
+    loadDetail();
+    if (!DETAIL_TIMER) DETAIL_TIMER = setInterval(loadDetail, 30000);
+  } else {
+    $("detail").classList.remove("show");
+    $("nodes").style.display = "";
+    if (DETAIL_TIMER) { clearInterval(DETAIL_TIMER); DETAIL_TIMER = null; }
+  }
+}
+
+function setTheme(t) {
+  document.body.dataset.theme = t;
+  localStorage.setItem("fwprobe_theme", t);
+  $("theme_btn").textContent = t === "dark" ? "白天模式" : "夜间模式";
+}
+function toggleTheme() {
+  setTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
+  if (CUR && location.hash) loadDetail();
+}
+
+setTheme(localStorage.getItem("fwprobe_theme") || "dark");
+window.addEventListener("hashchange", route);
+loadSummary().then(route);
+setInterval(() => { loadSummary(); if (location.hash) loadDetail(); }, 10000);
 </script>
 </body>
 </html>

@@ -139,11 +139,30 @@ class TestStore(unittest.TestCase):
         d = P.public_summary(self.st)
         self.assertEqual(len(d["nodes"]), 1)
         n = d["nodes"][0]
-        for leak in ("token_hash", "public_ip", "hostname", "kernel"):
+        for leak in ("token_hash", "public_ip", "hostname"):
             self.assertNotIn(leak, n)
+        self.assertEqual(n["kernel"], "6.1.0")      # 内核版本是有意公开的（卡片上用）
         self.assertEqual(n["alias"], "香港-1")
         self.assertIn("sample", n)
         self.assertTrue(n["online"])
+
+    def test_spark_series(self):
+        nid, _ = self.st.add_node("a")
+        node = self.st.node(nid)
+        now = int(time.time())
+        for i in range(3):
+            p = payload(); p["ts"] = now - (3 - i) * 30
+            p["net"]["rx_bps"] = 100 * (i + 1); p["net"]["tx_bps"] = 200 * (i + 1)
+            p["cpu"] = 1.0 * (i + 1)
+            self.st.ingest(node, p, "1.1.1.1")
+        sp = self.st.spark(nid, 10)
+        self.assertEqual(sp["rx"], [100, 200, 300])
+        self.assertEqual(sp["tx"], [200, 400, 600])
+        ser = self.st.series(nid, 1)
+        self.assertEqual(len(ser["points"]), 3)
+        self.assertEqual(ser["points"][-1]["cpu"], 3.0)
+        self.assertIn("上海电信", ser["checks"])
+        self.assertEqual(len(ser["checks"]["上海电信"]), 3)
 
     def test_offline_after_threshold(self):
         nid, _ = self.st.add_node("a")
@@ -256,6 +275,16 @@ class TestHTTP(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 200)
         self.assertIsNone(self.st.node(d["id"]))
+
+    def test_series_endpoint(self):
+        self._post("/api/report", payload(), token=self.tok)
+        code, body = self._get(f"/api/public/series?node={self.nid}&hours=1")
+        self.assertEqual(code, 200, body)
+        d = json.loads(body)
+        self.assertEqual(len(d["points"]), 1)
+        self.assertIn("上海电信", d["checks"])
+        code, _ = self._get("/api/public/series?node=nope")
+        self.assertEqual(code, 404)
 
     def test_agent_scripts_served(self):
         for path in ("/install-agent.sh", "/agent.py"):
@@ -383,6 +412,44 @@ class TestMisc(unittest.TestCase):
         self.assertEqual(P._quota("1T"), 1024 ** 4)
         self.assertEqual(P._quota(""), 0)
         self.assertEqual(P._quota("abc"), 0)
+
+    def test_lookup_country_self_for_private(self):
+        """内网/回环来源 → 查本机自己的归属地（agent 与中心同机时正好对）"""
+        seen = []
+
+        class _Resp:
+            def __read__(self): pass
+            def read(self, n=None): return b'{"countryCode":"SG"}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(url, timeout=0):
+            seen.append(url if isinstance(url, str) else getattr(url, "full_url", ""))
+            return _Resp()
+
+        orig = P.urllib.request.urlopen
+        P.urllib.request.urlopen = fake_urlopen
+        try:
+            self.assertEqual(P.lookup_country("10.0.0.5"), "SG")
+            self.assertTrue(any("fields=countryCode" in u and "/json/?" in u for u in seen))
+            self.assertEqual(P.lookup_country("192.168.1.1"), "SG")
+        finally:
+            P.urllib.request.urlopen = orig
+
+    def test_lookup_country_public_ip(self):
+        class _Resp:
+            def read(self, n=None): return b'{"countryCode":"JP"}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        orig = P.urllib.request.urlopen
+        P.urllib.request.urlopen = lambda url, timeout=0: _Resp()
+        try:
+            P.COUNTRY_CACHE.pop("8.8.8.8", None)      # 注意：203.0.113.0/24 是 TEST-NET，Python 会当成私有
+            self.assertEqual(P.lookup_country("8.8.8.8"), "JP")
+            self.assertEqual(P.COUNTRY_CACHE["8.8.8.8"], "JP")
+        finally:
+            P.urllib.request.urlopen = orig
 
     def test_is_private_ip(self):
         self.assertTrue(P.is_private_ip("10.0.0.1"))

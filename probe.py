@@ -265,7 +265,29 @@ class Store:
                  payload.get("kernel") or "", payload.get("hostname") or "",
                  payload.get("agent") or "", peer_ip or "", node["id"]))
             self.conn.commit()
+        self._maybe_country(node, peer_ip)
         return now
+
+    def _maybe_country(self, node, peer_ip):
+        """新节点首次上报：后台查一次归属地，写回 country（后台可手动覆盖）。"""
+        if node.get("country"):
+            return
+        key = node["id"]
+        if key in COUNTRY_DONE:
+            return
+        COUNTRY_DONE.add(key)
+
+        def work():
+            code = lookup_country(peer_ip)
+            if not code:
+                COUNTRY_DONE.discard(key)        # 下次上报再试
+                return
+            try:
+                self.update_node(key, country=code)
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     # -- 查询 ---------------------------------------------------------------
     def latest(self, nid):
@@ -293,6 +315,40 @@ class Store:
         rx = max(0, (last["rx_total"] or 0) - (first["rx_total"] or 0))
         tx = max(0, (last["tx_total"] or 0) - (first["tx_total"] or 0))
         return rx, tx
+
+    def spark(self, nid, n=24):
+        """最近 n 个采样点的上/下行速率（卡片点线走势用，省一次请求）"""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT rx_bps,tx_bps FROM samples WHERE node_id=? ORDER BY ts DESC LIMIT ?",
+                (nid, n)).fetchall()
+        rows = list(reversed(rows))
+        return {"rx": [r["rx_bps"] or 0 for r in rows], "tx": [r["tx_bps"] or 0 for r in rows]}
+
+    def series(self, nid, hours=24):
+        """详情页曲线：<=24h 原始 30s；<=30d 分钟聚合；更久用小时聚合"""
+        span = max(1, int(hours))
+        now = int(time.time())
+        since = now - span * 3600
+        table = "samples" if span <= 24 else ("samples_min" if span <= 24 * 30 else "samples_hour")
+        with self.lock:
+            rows = self.conn.execute(
+                f"SELECT ts,cpu,mem_used,mem_total,disk_used,disk_total,load1,rx_bps,tx_bps,tcp,udp"
+                f" FROM {table} WHERE node_id=? AND ts>=? ORDER BY ts", (nid, since)).fetchall()
+            ctable = "checks" if span <= 24 else "checks_min"
+            crows = self.conn.execute(
+                f"SELECT ts,name,ok,loss,ravg,rmax FROM {ctable}"
+                f" WHERE node_id=? AND ts>=? ORDER BY ts", (nid, since)).fetchall()
+        points = [{"ts": r["ts"], "cpu": r["cpu"],
+                   "mem": r["mem_used"] or 0, "mem_total": r["mem_total"] or 0,
+                   "disk": r["disk_used"] or 0, "disk_total": r["disk_total"] or 0,
+                   "load1": r["load1"], "rx": r["rx_bps"], "tx": r["tx_bps"],
+                   "tcp": r["tcp"], "udp": r["udp"]} for r in rows]
+        checks = {}
+        for r in crows:
+            checks.setdefault(r["name"], []).append(
+                {"ts": r["ts"], "ok": r["ok"], "loss": r["loss"], "avg": r["ravg"], "max": r["rmax"]})
+        return {"hours": span, "points": points, "checks": checks}
 
     # -- 维护 ---------------------------------------------------------------
     def rollup_and_prune(self):
@@ -330,6 +386,41 @@ class Store:
 
 
 # --------------------------------------------------------------------------- 工具
+COUNTRY_CACHE = {}
+COUNTRY_DONE = set()
+
+
+def lookup_country(ip: str):
+    """按 IP 查国家代码（只在新节点首次上报时查一次，失败静默）。
+
+    内网/回环来源（agent 与中心同机、或同内网）拿不到真实出口 IP —— 这时查「本机自己的归属地」，
+    对这两类场景正好是对的；真正的公网来源照常用它的 IP 查。
+    """
+    self_lookup = not ip or is_private_ip(ip)
+    if not self_lookup and ip in COUNTRY_CACHE:
+        return COUNTRY_CACHE[ip]
+    urls = (("http://ip-api.com/json/?fields=countryCode", "https://ipapi.co/country/")
+            if self_lookup else
+            (f"http://ip-api.com/json/{ip}?fields=countryCode", f"https://ipapi.co/{ip}/country/"))
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=4) as r:
+                body = r.read(64).decode("utf-8", "replace").strip()
+            code = ""
+            if body.startswith("{"):
+                code = (json.loads(body).get("countryCode") or "").upper()
+            else:
+                code = body[:2].upper()
+            if len(code) == 2 and code.isalpha():
+                if not self_lookup:
+                    COUNTRY_CACHE[ip] = code
+                return code
+        except Exception:
+            continue
+    return ""
+
+
 def is_private_ip(ip: str) -> bool:
     try:
         return ipaddress.ip_address(ip).is_private
@@ -350,12 +441,17 @@ def public_summary(store: Store):
         out.append({
             "id": n["id"], "alias": n["alias"], "group": n.get("grp", ""),
             "os_id": n.get("os_id", ""), "os_name": n.get("os_name", ""),
+            "kernel": n.get("kernel", ""),
             "country": n.get("country", ""),
             "online": online,
             "last_seen": n.get("last_seen", 0),
+            "uptime": (s or {}).get("uptime") or 0,
+            "agent_ver": n.get("agent_ver", ""),
             "expires_at": n.get("expires_at", ""),
             "quota_bytes": n.get("quota_bytes", 0),
+            "used_bytes": rx + tx,
             "rx_total": rx, "tx_total": tx,
+            "spark": store.spark(n["id"], 24),
             "sample": s, "checks": checks,
         })
     return {"version": VERSION, "now": now, "offline_after": OFFLINE_AFTER, "nodes": out}
@@ -435,6 +531,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static(name, ctype)
         if path == "/api/public/summary":
             return self._send(200, public_summary(self.store))
+        if path == "/api/public/series":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            nid = (q.get("node") or [""])[0]
+            if not self.store.node(nid):
+                return self._send(404, {"error": "节点不存在"})
+            try:
+                hours = int((q.get("hours") or ["24"])[0])
+            except ValueError:
+                hours = 24
+            return self._send(200, self.store.series(nid, hours))
         if path == "/api/nodes":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
