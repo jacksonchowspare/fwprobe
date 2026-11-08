@@ -48,6 +48,12 @@
   button{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
     border-radius:8px;padding:6px 11px;cursor:pointer;transition:background .16s,border-color .16s}
   button:hover{background:rgba(77,163,255,.14);border-color:rgba(77,163,255,.45)}
+  .abtn{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;color:var(--text);
+    background:var(--hover);border:1px solid var(--border);text-decoration:none;font-size:13px;
+    transition:background .16s,border-color .16s;white-space:nowrap}
+  .abtn:hover{background:rgba(77,163,255,.14);border-color:rgba(77,163,255,.45)}
+  .abtn svg{opacity:.85}
+  @media (max-width:520px){.abtn span{display:none}.abtn{padding:6px 8px}}
   /* 1080p / 1440p / 4K 都是 4 列（内容区上限 2000px）；1300px 以下 2 列；860px 以下 1 列（手机） */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:16px}
   .card{
@@ -219,6 +225,14 @@
       <span class="ver" id="refreshed"><i class="dot"></i><span>加载中</span></span>
       <span class="ver stat" id="stat_on"><i class="dot"></i><span>--</span></span>
       <span class="ver stat" id="stat_off"><i class="dot off"></i><span>--</span></span>
+      <a class="abtn" href="/admin" title="进入后台管理">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>后台</span>
+      </a>
       <button id="theme_btn" onclick="toggleTheme()">白天模式</button>
     </div>
   </header>
