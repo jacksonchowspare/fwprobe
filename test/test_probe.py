@@ -147,6 +147,23 @@ class TestStore(unittest.TestCase):
         self.assertIn("sample", n)
         self.assertTrue(n["online"])
 
+    def test_multi_groups(self):
+        """一个节点可挂多个分组：groups 存 JSON，grp 保留主分组（兼容老代码）"""
+        nid, _ = self.st.add_node("n1", groups=["生产", "东京"])
+        n = self.st.node(nid)
+        self.assertEqual(n["grp"], "生产")
+        self.assertEqual(P.parse_groups(n["groups"]), ["生产", "东京"])
+        # 改组
+        self.st.update_node(nid, groups=["测试"])
+        n = self.st.node(nid)
+        self.assertEqual(P.parse_groups(n["groups"]), ["测试"])
+        self.assertEqual(n["grp"], "测试")
+        # 清空分组
+        self.st.update_node(nid, groups=[])
+        n = self.st.node(nid)
+        self.assertEqual(P.parse_groups(n["groups"]), [])
+        self.assertEqual(n["grp"], "")
+
     def test_check_hist(self):
         """卡片 20 格滚动条：每条线路按时间旧→新返回，最多 20 条"""
         nid, _ = self.st.add_node("a")
@@ -323,6 +340,16 @@ class TestHTTP(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 200)
         self.assertIsNone(self.st.node(d["id"]))
+
+    def test_groups_in_summary(self):
+        """老数据只填了 grp 时，摘要也要给出 groups 列表（前端筛选要用）"""
+        self.st.conn.execute("UPDATE nodes SET groups='', grp='老分组' WHERE id=?", (self.nid,))
+        self.st.conn.commit()
+        self._post("/api/report", payload(), token=self.tok)
+        code, body = self._get("/api/public/summary")
+        self.assertEqual(code, 200, body)
+        n = json.loads(body)["nodes"][0]
+        self.assertEqual(n["groups"], ["老分组"])
 
     def test_series_endpoint(self):
         self._post("/api/report", payload(), token=self.tok)

@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 APP_NAME = "fwprobe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -155,6 +155,24 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def parse_groups(raw, fallback=""):
+    """分组字段统一解析：优先 JSON 数组，老数据回落到单个 grp 字符串"""
+    if raw:
+        try:
+            v = json.loads(raw)
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+            if isinstance(v, str) and v.strip():
+                return [v.strip()]
+        except (ValueError, TypeError):
+            return [x.strip() for x in str(raw).split(",") if x.strip()]
+    return [fallback] if fallback else []
+
+
+def dump_groups(groups):
+    return json.dumps([str(g).strip() for g in (groups or []) if str(g).strip()], ensure_ascii=False)
+
+
 class Store:
     def __init__(self, path: str):
         self.path = path
@@ -168,17 +186,19 @@ class Store:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._migrate()
 
     # -- 节点 ---------------------------------------------------------------
-    def add_node(self, alias, grp="", quota_bytes=0, expires_at="", note=""):
+    def add_node(self, alias, grp="", quota_bytes=0, expires_at="", note="", groups=None):
         nid = secrets.token_hex(6)
         tok = new_token()
+        glist = [g.strip() for g in (groups if groups is not None else ([grp] if grp else [])) if g and g.strip()]
         with self.lock:
             self.conn.execute(
-                "INSERT INTO nodes(id,alias,grp,token_hash,quota_bytes,expires_at,note,created)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (nid, alias, grp, sha256_hex(tok), int(quota_bytes or 0),
-                 expires_at or "", note or "", int(time.time())))
+                "INSERT INTO nodes(id,alias,grp,groups,token_hash,quota_bytes,expires_at,note,created)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (nid, alias, (glist[0] if glist else ""), dump_groups(glist), sha256_hex(tok),
+                 int(quota_bytes or 0), expires_at or "", note or "", int(time.time())))
             self.conn.commit()
         return nid, tok
 
@@ -188,6 +208,18 @@ class Store:
             cur = self.conn.execute("UPDATE nodes SET token_hash=? WHERE id=?", (sha256_hex(tok), nid))
             self.conn.commit()
             return tok if cur.rowcount else None
+
+    def _migrate(self):
+        """轻量迁移：新增 groups 列（多分组），老库/老数据继续可用"""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(nodes)")}
+        if "groups" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN groups TEXT DEFAULT ''")
+            self.conn.commit()
+            # 把老的单个 grp 灌进去，保证卡片标签不丢
+            for r in self.conn.execute("SELECT id,grp FROM nodes WHERE grp != ''").fetchall():
+                self.conn.execute("UPDATE nodes SET groups=? WHERE id=?",
+                                  (dump_groups([r[1]]), r[0]))
+            self.conn.commit()
 
     def nodes(self):
         with self.lock:
@@ -205,7 +237,11 @@ class Store:
             return dict(r) if r else None
 
     def update_node(self, nid, **fields):
-        allowed = {"alias", "grp", "quota_bytes", "expires_at", "note", "enabled", "country"}
+        if "groups" in fields:
+            glist = [str(g).strip() for g in (fields.pop("groups") or []) if str(g).strip()]
+            fields["groups"] = dump_groups(glist)
+            fields["grp"] = glist[0] if glist else ""       # grp 保留为主分组，兼容旧代码
+        allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled", "country"}
         kv = {k: v for k, v in fields.items() if k in allowed}
         if not kv:
             return False
@@ -452,7 +488,9 @@ def public_summary(store: Store):
         online = bool(n.get("last_seen")) and (now - int(n["last_seen"]) < OFFLINE_AFTER)
         rx, tx = store.totals(n["id"])
         out.append({
-            "id": n["id"], "alias": n["alias"], "group": n.get("grp", ""),
+            "id": n["id"], "alias": n["alias"],
+            "group": n.get("grp", ""),
+            "groups": parse_groups(n.get("groups"), n.get("grp", "")),
             "os_id": n.get("os_id", ""), "os_name": n.get("os_name", ""),
             "kernel": n.get("kernel", ""),
             "country": n.get("country", ""),

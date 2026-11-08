@@ -104,6 +104,16 @@
   .foot b{color:var(--text);font-weight:600}
   .empty{color:var(--muted);text-align:center;padding:46px 0}
   footer{color:var(--muted);font-size:12px;text-align:center;margin-top:26px}
+  .filters{display:flex;flex-direction:column;gap:7px;margin:0 0 14px}
+  .frow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .flabel{font-size:11px;color:var(--muted);min-width:26px;letter-spacing:.3px}
+  .chip{font:inherit;font-size:11.5px;line-height:1.5;padding:3px 9px;border-radius:999px;cursor:pointer;
+    border:1px solid var(--border);background:var(--hover);color:var(--muted);
+    display:inline-flex;align-items:center;gap:5px;transition:background .14s,border-color .14s,color .14s}
+  .chip:hover{border-color:rgba(77,163,255,.45);color:var(--text)}
+  .chip.active{color:var(--text);border-color:rgba(77,163,255,.55);background:rgba(77,163,255,.16)}
+  .chip i{font-style:normal;font-size:10.5px;opacity:.7}
+  .chip .flag{font-size:12px;line-height:1}
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;
     align-items:center;justify-content:center;z-index:90;padding:18px}
   .mask.show{display:flex}
@@ -170,6 +180,7 @@
     </div>
   </div>
 
+  <div class="filters" id="filters"></div>
   <div class="grid" id="nodes"><div class="empty">加载中…</div></div>
   <footer>数据来源：各节点 agent 主动上报 · 超过 <span id="oa">120</span> 秒无上报判定离线</footer>
 </div>
@@ -180,6 +191,8 @@
 
 <script>
 const $ = id => document.getElementById(id);
+const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, ch =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 
 const fmtBytes = n => {
   if (n === null || n === undefined || isNaN(n)) return "-";
@@ -312,7 +325,7 @@ function card(n) {
     const loss = c.loss || 0;
     const h = (n.hist || {})[c.name] || [];
     return `<div class="r">
-      <span class="name">${c.name}</span>
+      <span class="name">${esc(c.name)}</span>
       ${strip(h, "lat")}
       <span class="ms ${LAT_CLASS(ms)}">${ms == null ? "超时" : Math.round(ms) + " ms"}</span>
       ${strip(h, "loss")}
@@ -322,16 +335,16 @@ function card(n) {
   return `<div class="card" onclick="openDetail('${n.id}')">
     <div class="head">
       <span class="flag">${flag(n.country)}</span>
-      <span class="alias">${n.alias || n.id}</span>
+      <span class="alias">${esc(n.alias || n.id)}</span>
       <span class="icons">
-        <button class="ico os" title="${n.os_name || n.os_id || 'Linux'}" onclick="event.stopPropagation()">${osIcon(n.os_id)}</button>
+        <button class="ico os" title="${esc(n.os_name || n.os_id || 'Linux')}" onclick="event.stopPropagation()">${osIcon(n.os_id)}</button>
         <button class="ico" title="快速详情" onclick="event.stopPropagation();openQuick('${n.id}')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
             <path d="M4 17V9M9 17V5M14 17v-6M19 17v-9M3 21h18"/></svg></button>
       </span>
     </div>
     <div class="tags">
-      ${n.group ? `<span class="tag">${n.group}</span>` : ""}
+      ${nodeGroups(n).slice(0, 3).map(g => `<span class="tag">${esc(g)}</span>`).join("")}
       <span class="tag ${fam}">${fam.toUpperCase()}</span>
       <span class="tag ${n.online ? "on" : "off"}" style="margin-left:auto">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span>
     </div>
@@ -377,11 +390,85 @@ function card(n) {
   </div>`;
 }
 
+/* ───────── 筛选：地区（单选，来自 IP 归属）+ 分组（多选，人工维护）───────── */
+const FILTER = { region: "", groups: new Set() };
+
+function readFilterFromUrl() {
+  const q = new URLSearchParams(location.search);
+  FILTER.region = (q.get("r") || "").toUpperCase();
+  FILTER.groups = new Set((q.get("g") || "").split(",").map(x => x.trim()).filter(Boolean));
+}
+function writeFilterToUrl() {
+  const q = new URLSearchParams(location.search);
+  FILTER.region ? q.set("r", FILTER.region) : q.delete("r");
+  FILTER.groups.size ? q.set("g", [...FILTER.groups].join(",")) : q.delete("g");
+  const qs = q.toString();
+  history.replaceState(null, "", location.pathname + (qs ? "?" + qs : "") + location.hash);
+}
+const nodeGroups = n => (n.groups && n.groups.length) ? n.groups : (n.group ? [n.group] : []);
+function visibleNodes() {
+  return (NODES || []).filter(n => {
+    if (FILTER.region && String(n.country || "").toUpperCase() !== FILTER.region) return false;
+    if (FILTER.groups.size && !nodeGroups(n).some(g => FILTER.groups.has(g))) return false;
+    return true;
+  });
+}
+function setRegion(c) { FILTER.region = c; writeFilterToUrl(); renderFilters(); renderSummary(); }
+function toggleGroup(g) {
+  FILTER.groups.has(g) ? FILTER.groups.delete(g) : FILTER.groups.add(g);
+  writeFilterToUrl(); renderFilters(); renderSummary();
+}
+function clearFilters() {
+  FILTER.region = ""; FILTER.groups.clear();
+  writeFilterToUrl(); renderFilters(); renderSummary();
+}
+
+function renderFilters() {
+  const all = NODES || [];
+  const regions = {}, groups = {};
+  all.forEach(n => {
+    const c = String(n.country || "").toUpperCase();
+    if (c) { (regions[c] = regions[c] || { n: 0, on: 0 }); regions[c].n++; if (n.online) regions[c].on++; }
+    nodeGroups(n).forEach(g => {
+      (groups[g] = groups[g] || { n: 0, on: 0 }); groups[g].n++; if (n.online) groups[g].on++;
+    });
+  });
+  const rk = Object.keys(regions).sort(), gk = Object.keys(groups).sort();
+  let html = "";
+  if (rk.length > 1 || FILTER.region) {
+    html += `<div class="frow"><span class="flabel">地区</span>`
+      + `<button class="chip ${FILTER.region ? "" : "active"}" onclick="setRegion('')">全部 <i>${all.length}</i></button>`
+      + rk.map(c => `<button class="chip ${FILTER.region === c ? "active" : ""}" title="在线 ${regions[c].on}/${regions[c].n}"
+           onclick="setRegion('${c}')"><span class="flag">${flag(c)}</span>${c} <i>${regions[c].n}</i></button>`).join("")
+      + `</div>`;
+  }
+  if (gk.length) {
+    html += `<div class="frow"><span class="flabel">分组</span>`
+      + `<button class="chip ${FILTER.groups.size ? "" : "active"}" onclick="clearGroups()">全部 <i>${all.length}</i></button>`
+      + gk.map(g => `<button class="chip ${FILTER.groups.has(g) ? "active" : ""}" title="在线 ${groups[g].on}/${groups[g].n}"
+           onclick="toggleGroup('${esc(g).replace(/'/g, "\\'")}')">${esc(g)} <i>${groups[g].n}</i></button>`).join("")
+      + `</div>`;
+  }
+  const active = FILTER.region || FILTER.groups.size;
+  if (active) html += `<div class="frow" style="font-size:11.5px;color:var(--muted)">
+    <span id="fcount"></span><button class="chip" style="margin-left:6px" onclick="clearFilters()">清除筛选</button></div>`;
+  $("filters").innerHTML = html;
+  if (active && $("fcount")) {
+    const v = visibleNodes();
+    $("fcount").textContent = `筛出 ${v.length} 台（在线 ${v.filter(n => n.online).length} 台）`;
+  }
+}
+function clearGroups() { FILTER.groups.clear(); writeFilterToUrl(); renderFilters(); renderSummary(); }
+
 function renderSummary() {
-  const list = NODES || [];
-  $("meta").textContent = `${list.filter(n => n.online).length}/${list.length} 在线`;
+  const all = NODES || [];
+  const list = visibleNodes();
+  $("meta").textContent = `${all.filter(n => n.online).length}/${all.length} 在线`;
+  renderFilters();
   $("nodes").innerHTML = list.length ? list.map(card).join("")
-    : `<div class="empty">还没有节点：在中心执行 probe.py addnode 后用生成的命令装 agent。</div>`;
+    : (all.length ? `<div class="empty">没有符合筛选的节点。<br><br>
+        <button class="chip" onclick="clearFilters()">清除筛选</button></div>`
+      : `<div class="empty">还没有节点：在中心执行 probe.py addnode 后用生成的命令装 agent。</div>`);
 }
 
 async function loadSummary() {
@@ -552,12 +639,14 @@ function route() {
   if (m) {
     CUR = (NODES || []).find(x => x.id === m[1]) || CUR;
     $("nodes").style.display = "none";
+    $("filters").style.display = "none";
     $("detail").classList.add("show");
     loadDetail();
     if (!DETAIL_TIMER) DETAIL_TIMER = setInterval(loadDetail, 30000);
   } else {
     $("detail").classList.remove("show");
     $("nodes").style.display = "";
+    $("filters").style.display = "";
     if (DETAIL_TIMER) { clearInterval(DETAIL_TIMER); DETAIL_TIMER = null; }
   }
 }
@@ -587,6 +676,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { loadSummary(); if (location.hash) loadDetail(); }
 });
 
+readFilterFromUrl();
 setTheme(localStorage.getItem("fwprobe_theme") || "dark");
 window.addEventListener("hashchange", route);
 loadSummary().then(route);
