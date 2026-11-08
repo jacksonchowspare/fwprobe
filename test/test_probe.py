@@ -467,6 +467,42 @@ class TestHTTP(unittest.TestCase):
         actions = [a["action"] for a in json.loads(body)["items"]]
         self.assertIn("node_add", actions)
 
+    def test_password_hash_and_login(self):
+        """密码走 PBKDF2 哈希，能登录；登录失败计数不受影响；密码登录也认 remember"""
+        h = P.hash_password("hunter2hunter2")
+        self.assertTrue(h.startswith("pbkdf2_sha256$"))
+        self.assertTrue(P.verify_password("hunter2hunter2", h))
+        self.assertFalse(P.verify_password("wrong", h))
+        self.assertFalse(P.verify_password("x", "乱码"))
+        # 服务端配置里挂上密码后，用密码走登录接口
+        self.srv.config["admin_password"] = h
+        code, body = self._post("/api/admin/login", {"password": "hunter2hunter2", "remember": True}, csrf=False)
+        self.assertEqual(code, 200, body)
+        code, body = self._post("/api/admin/login", {"password": "wrong"}, csrf=False)
+        self.assertEqual(code, 401)
+        # token 依旧可用
+        code, body = self._post("/api/admin/login", {"password": "admin-test"}, csrf=False)
+        self.assertEqual(code, 200, body)
+        self.srv.config.pop("admin_password", None)
+
+    def test_passwd_api_changes_password(self):
+        # 写配置要落到临时文件（服务端 root 才有 /etc 写权限）
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        P.CONFIG_PATH = os.path.join(tmpdir, "config.json")
+        with open(P.CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"admin_token": "admin-test"}, fh)
+        code, body = self._post("/api/admin/passwd", {"old": "admin-test", "new": "newpass123"}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        self.assertTrue(P.verify_password("newpass123", self.srv.config.get("admin_password", "")))
+        # 错误旧密码拒绝
+        code, body = self._post("/api/admin/passwd", {"old": "bad", "new": "another123"}, token="admin-test")
+        self.assertEqual(code, 403)
+        # 太短拒绝
+        code, body = self._post("/api/admin/passwd", {"old": "newpass123", "new": "短"}, token="admin-test")
+        self.assertEqual(code, 400)
+        self.srv.config.pop("admin_password", None)
+
     def test_token_rotate(self):
         """重发令牌：旧 token 立刻失效，新 token 能上报"""
         code, body = self._post("/api/nodes", {"alias": "轮换机"}, token="admin-test")

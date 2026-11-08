@@ -103,8 +103,13 @@
   <!-- 登录 -->
   <div id="login" class="panel" hidden>
     <h1>iProbe 后台</h1>
-    <div class="muted small">输入管理 token 登录。token 在中心服务器 <code>/etc/fwprobe/config.json</code> 里。</div>
-    <div class="row"><input id="tok" type="password" placeholder="管理 token" autocomplete="current-password"></div>
+    <div class="muted small">用后台密码或管理 token 登录。忘了密码可在服务器执行 <code>probe.py passwd</code> 重设，
+      不知道 token 可执行 <code>probe.py token</code> 查看。</div>
+    <div class="row"><input id="tok" type="password" placeholder="密码 / 管理 token" autocomplete="current-password"></div>
+    <div class="row" style="display:flex;align-items:center;gap:8px">
+      <input id="remember" type="checkbox" style="width:auto;margin:0">
+      <label for="remember" class="small muted" style="margin:0">在这台设备上保持登录 30 天</label>
+    </div>
     <div class="row"><button class="primary" style="width:100%" onclick="doLogin()">登录</button></div>
     <div class="err" id="login_err"></div>
   </div>
@@ -117,6 +122,7 @@
       <span class="sp"></span>
       <a href="/" class="small" style="text-decoration:none">← 状态页</a>
       <button class="small" onclick="toggleTheme()">白天模式</button>
+      <button class="small" onclick="openPasswd()">改密码</button>
       <button class="small" onclick="doLogout()">退出</button>
     </header>
 
@@ -182,6 +188,22 @@
     <div class="dlgfoot">
       <button onclick="copyCmd()">复制命令</button>
       <button class="primary" onclick="closeMask('m_cmd')">我已保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 改密码 -->
+<div class="mask" id="m_pw">
+  <div class="dlg" style="max-width:420px">
+    <h2>修改后台密码</h2>
+    <div class="f"><label>当前密码 / 管理 token</label><input id="pw_old" type="password" autocomplete="current-password"></div>
+    <div class="f"><label>新密码（至少 8 位，留空 = 清除密码，只用 token 登录）</label>
+      <input id="pw_new" type="password" autocomplete="new-password"></div>
+    <div class="f"><label>再输一次新密码</label><input id="pw_new2" type="password" autocomplete="new-password"></div>
+    <div class="muted small">密码只存 PBKDF2 哈希，明文不落盘；改完建议勾上「保持登录 30 天」。</div>
+    <div class="dlgfoot">
+      <button onclick="closeMask('m_pw')">取消</button>
+      <button class="primary" onclick="savePasswd()">保存</button>
     </div>
   </div>
 </div>
@@ -253,7 +275,8 @@ async function boot() {
 }
 async function doLogin() {
   $("login_err").textContent = "";
-  const r = await API("/api/admin/login", {method: "POST", body: JSON.stringify({token: $("tok").value.trim()})});
+  const r = await API("/api/admin/login", {method: "POST",
+    body: JSON.stringify({password: $("tok").value.trim(), remember: $("remember").checked})});
   const d = await r.json().catch(() => ({}));
   if (!r.ok) { $("login_err").textContent = d.error || "登录失败"; return; }
   $("tok").value = "";
@@ -441,6 +464,24 @@ async function delNode(id) {
   const r = await API("/api/nodes/" + id, {method: "DELETE"});
   if (!r.ok) { alert("删除失败"); return; }
   load();
+}
+
+/* ── 改密码 ── */
+function openPasswd() {
+  $("pw_old").value = ""; $("pw_new").value = ""; $("pw_new2").value = "";
+  openMask("m_pw");
+  setTimeout(() => $("pw_old").focus(), 50);
+}
+async function savePasswd() {
+  const oldv = $("pw_old").value.trim(), n1 = $("pw_new").value, n2 = $("pw_new2").value;
+  if (!oldv) { alert("先填当前密码或 token"); return; }
+  if (n1 !== n2) { alert("两次新密码不一致"); return; }
+  if (n1 && n1.length < 8) { alert("新密码至少 8 位"); return; }
+  const r = await API("/api/admin/passwd", {method: "POST", body: JSON.stringify({old: oldv, new: n1})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "保存失败"); return; }
+  closeMask("m_pw");
+  alert(n1 ? "密码已更新，下次用新密码登录。" : "已清除密码，现在只能用管理 token 登录。");
 }
 
 /* ── 分组管理 ── */

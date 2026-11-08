@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -221,11 +221,40 @@ TAG_COLORS = ["#fbbf24", "#34d399", "#4da3ff", "#a78bfa", "#f472b6",
 
 
 SESSION_COOKIE = "iprobe_sess"
-SESSION_TTL = 12 * 3600
+SESSION_TTL = 12 * 3600             # 默认 12 小时
+SESSION_TTL_LONG = 30 * 24 * 3600   # 勾「保持登录」30 天
 LOGIN_FAIL_WINDOW = 600        # 10 分钟
 LOGIN_FAIL_MAX = 5             # 同一 IP 最多错 5 次
 _login_fails = {}              # ip -> [失败时间戳]
 _login_lock = threading.Lock()
+
+
+def hash_password(pw, iterations=200_000):
+    """PBKDF2-HMAC-SHA256，存成 pbkdf2_sha256$迭代$盐$哈希"""
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(pw, stored):
+    try:
+        algo, it, salt, want = str(stored).split("$")
+        if algo != "pbkdf2_sha256" or not pw:
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), int(it))
+        return hmac.compare_digest(dk.hex(), want)
+    except Exception:
+        return False
+
+
+def save_config(cfg):
+    """回写配置（保持 0600；先写临时文件再 rename，避免写一半断电）"""
+    os.makedirs(os.path.dirname(CONFIG_PATH) or ".", exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONFIG_PATH)
 
 
 def make_session(admin_token, ttl=SESSION_TTL):
@@ -878,14 +907,19 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 return self._send(429, {"error": f"尝试过于频繁，请 {wait // 60 + 1} 分钟后再试"})
             data = self._json_body() or {}
-            tok = self.server.config.get("admin_token") or ""
-            given = str(data.get("token") or "").strip()
-            if not tok or not given or not secrets.compare_digest(given, tok):
+            cfg = self.server.config
+            tok = cfg.get("admin_token") or ""
+            given = str(data.get("password") or data.get("token") or "").strip()
+            pw_hash = cfg.get("admin_password") or ""
+            ok_pw = bool(pw_hash) and verify_password(given, pw_hash)
+            ok_tok = bool(tok) and bool(given) and secrets.compare_digest(given, tok)
+            if not (ok_pw or ok_tok):
                 note_login_fail(ip)
                 self.store.audit("login_fail", "", "", ip)
-                return self._send(401, {"error": "管理 token 不正确"})
+                return self._send(401, {"error": "密码或 token 不正确"})
             clear_login_fail(ip)
-            value, exp = make_session(tok)
+            remember = bool(data.get("remember"))
+            value, exp = make_session(tok, SESSION_TTL_LONG if remember else SESSION_TTL)
             self.store.audit("login", "", "", ip)
             cookie = (f"{SESSION_COOKIE}={value}; Path=/; Max-Age={exp - int(time.time())}; "
                       "HttpOnly; SameSite=Strict; Secure")
@@ -893,6 +927,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/logout":
             cookie = f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure"
             return self._send(200, {"ok": True}, headers={"Set-Cookie": cookie})
+        if path == "/api/admin/passwd":
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
+            data = self._json_body() or {}
+            old_pw = str(data.get("old") or "").strip()
+            new_pw = str(data.get("new") or "")
+            cfg = self.server.config
+            tok = cfg.get("admin_token") or ""
+            pw_hash = cfg.get("admin_password") or ""
+            ok_old = (bool(pw_hash) and verify_password(old_pw, pw_hash)) or \
+                     (bool(tok) and bool(old_pw) and secrets.compare_digest(old_pw, tok))
+            if not ok_old:
+                return self._send(403, {"error": "当前密码 / token 不正确"})
+            if new_pw and len(new_pw) < 8:
+                return self._send(400, {"error": "新密码至少 8 位"})
+            cfg["admin_password"] = hash_password(new_pw) if new_pw else ""
+            try:
+                save_config(cfg)
+            except OSError as exc:
+                return self._send(500, {"error": f"写配置失败：{exc}"})
+            self.store.audit("passwd_change", "", "已设置" if new_pw else "已清除", self._peer_ip())
+            return self._send(200, {"ok": True})
         if path == "/api/admin/groups/rename":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
@@ -1069,6 +1127,39 @@ def cmd_addnode(args):
     return 0
 
 
+def cmd_passwd(args):
+    cfg = load_config()
+    if args.clear:
+        cfg["admin_password"] = ""
+        save_config(cfg)
+        print("已清除后台密码，只能用管理 token 登录。")
+        return 0
+    import getpass
+    p1 = getpass.getpass("设置后台登录密码（至少 8 位）: ")
+    if len(p1) < 8:
+        print("密码太短", file=sys.stderr)
+        return 2
+    p2 = getpass.getpass("再输一次: ")
+    if p1 != p2:
+        print("两次不一致", file=sys.stderr)
+        return 2
+    cfg["admin_password"] = hash_password(p1)
+    save_config(cfg)
+    print("已设置后台登录密码（只存哈希，明文不落盘）。")
+    return 0
+
+
+def cmd_token(_args):
+    cfg = load_config()
+    tok = cfg.get("admin_token") or ""
+    if not tok:
+        print("配置里没有 admin_token，请重新安装或手动补一个。", file=sys.stderr)
+        return 2
+    print(tok)
+    print("（这是管理 token，等同后台密码，别贴到公开的地方）", file=sys.stderr)
+    return 0
+
+
 def cmd_listnodes(_args):
     cfg = load_config()
     store = Store(cfg["db"])
@@ -1119,13 +1210,17 @@ def main(argv=None):
     p.add_argument("--note", default="")
     p.add_argument("--server", default="", help="对外地址（默认取配置 base_url）")
 
+    p = sub.add_parser("passwd"); p.add_argument("--clear", action="store_true",
+                                                 help="清除后台密码，只保留 token 登录")
+    sub.add_parser("token")
     sub.add_parser("listnodes")
     p = sub.add_parser("rmtoken"); p.add_argument("node_id")
     p = sub.add_parser("delnode"); p.add_argument("node_id")
 
     args = ap.parse_args(argv)
     fn = {"serve": cmd_serve, "addnode": cmd_addnode, "listnodes": cmd_listnodes,
-          "rmtoken": cmd_rmtoken, "delnode": cmd_delnode}.get(args.cmd)
+          "rmtoken": cmd_rmtoken, "delnode": cmd_delnode,
+          "passwd": cmd_passwd, "token": cmd_token}.get(args.cmd)
     if not fn:
         ap.print_help()
         return 2
