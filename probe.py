@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.24"
+VERSION = "0.5.25"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1853,7 +1853,12 @@ class Handler(BaseHTTPRequestHandler):
                     # 起点留空 = 用这台机器现在的到期日（没有就用今天），不用一台台填
                     base = start or (n.get("renew_start") or n.get("expires_at") or "").strip() \
                         or local_date().isoformat()
-                    self.store.update_node(n["id"], renew_mode=mode, renew_start=base)
+                    upd = {"renew_mode": mode, "renew_start": base}
+                    if "quota_mode" in data:                     # 勾了「同时设置配额周期」
+                        upd["quota_mode"] = (data.get("quota_mode") or "").strip()
+                        upd["quota_start"] = (data.get("quota_start") or "").strip() \
+                            or local_date().isoformat()
+                    self.store.update_node(n["id"], **upd)
                     changed += 1
                 self.store.audit("node_renew_batch", f"{changed} 台",
                                  f"{mode or '不自动'} 起点 {start or '各自当前到期日'}", self._peer_ip())

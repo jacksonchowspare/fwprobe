@@ -323,6 +323,17 @@
       </div>
       <div class="f"><label>起始到期日（留空=各自当前）</label><input id="rn_start" type="date"></div>
     </div>
+    <label class="ck" style="margin:10px 0 6px"><input type="checkbox" id="rn_quota_on" onchange="rnQuotaToggle()">
+      同时设置配额周期（9 台都是按月的话，这一步能省掉逐台改）</label>
+    <div class="f2" id="rn_quota_box" hidden>
+      <div class="f"><label>配额周期</label>
+        <select id="rn_quota_mode">
+          <option value="">不按周期</option><option value="day">按日</option>
+          <option value="month" selected>按月</option><option value="year">按年</option>
+        </select>
+      </div>
+      <div class="f"><label>周期起始日（留空=各自今天）</label><input id="rn_quota_start" type="date"></div>
+    </div>
     <div class="f"><label>应用范围（默认全选）</label><div id="rn_list"></div></div>
     <div class="dlgfoot">
       <button onclick="closeMask('m_renew')">取消</button>
@@ -745,11 +756,18 @@ function openRenew() {
   }).join("");
   openMask("m_renew");
 }
+function rnQuotaToggle() {
+  $("rn_quota_box").hidden = !$("rn_quota_on").checked;
+}
 async function saveRenew() {
   const ids = [...document.querySelectorAll(".rn-on:checked")].map(x => x.value);
   if (!ids.length) { alert("至少选一台"); return; }
-  const r = await API("/api/nodes/renew-batch", {method: "POST",
-    body: JSON.stringify({ids, renew_mode: $("rn_mode").value, renew_start: $("rn_start").value || ""})});
+  const body = {ids, renew_mode: $("rn_mode").value, renew_start: $("rn_start").value || ""};
+  if ($("rn_quota_on").checked) {
+    body.quota_mode = $("rn_quota_mode").value;
+    body.quota_start = $("rn_quota_start").value || "";
+  }
+  const r = await API("/api/nodes/renew-batch", {method: "POST", body: JSON.stringify(body)});
   const d = await r.json().catch(() => ({}));
   if (!r.ok) { alert(d.error || "设置失败"); return; }
   closeMask("m_renew");

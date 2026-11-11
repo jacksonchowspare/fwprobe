@@ -775,6 +775,15 @@ class TestHTTP(unittest.TestCase):
         self.assertEqual(n2["renew_mode"], "year")
         self.assertEqual(n2["renew_start"], "2027-03-08")     # 留空 = 各自当前到期日
 
+    def test_renew_batch_can_set_quota_cycle(self):
+        code, body = self._post("/api/nodes/renew-batch",
+                                {"ids": [self.nid], "renew_mode": "month", "renew_start": "",
+                                 "quota_mode": "year", "quota_start": "2026-11-11"},
+                                token="admin-test")
+        self.assertEqual(code, 200, body)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["quota_mode"], n["quota_start"]), ("year", "2026-11-11"))
+
     def test_summary_carries_cycle_and_rolled_expiry(self):
         self.st.update_node(self.nid, quota_bytes=100 * 1024 ** 3, quota_mode="month",
                             quota_start=P.local_date().isoformat(),
