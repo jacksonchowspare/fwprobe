@@ -270,9 +270,10 @@
 <div class="mask" id="m_cmd">
   <div class="dlg">
     <h2 id="cmd_title">安装命令</h2>
-    <div class="muted small">在要监控的机器上以 root 执行：</div>
+    <div class="muted small">在要监控的机器上，用你的普通用户 + sudo 执行（会要一次密码）：</div>
     <div class="cmd" id="cmd_body"></div>
-    <div class="hint" id="cmd_hint">这条命令里的 token 只显示这一次，关掉就看不到了（可以随时「重发令牌」生成新的）。</div>
+    <div class="hint" id="cmd_hint">这条命令里的 token 只显示这一次，关掉就看不到了（可以随时「重发令牌」生成新的）。<br>
+      默认加 <code>--as-user fwprobe</code>：agent 用专用系统用户跑，只有 CAP_NET_RAW 一项能力。想用 root 跑就把这段删掉。</div>
     <div class="dlgfoot">
       <button onclick="copyCmd()">复制命令</button>
       <button class="primary" onclick="closeMask('m_cmd')">我已保存</button>
@@ -1020,7 +1021,7 @@ async function saveNode() {
 /* ── 安装命令 ── */
 function installCmd(token) {
   const base = location.origin;
-  return `curl -fsSL ${base}/install-agent.sh | sudo bash -s -- --token ${token} --server ${base}`;
+  return `curl -fsSL ${base}/install-agent.sh | sudo bash -s -- --token ${token} --server ${base} --as-user fwprobe`;
 }
 function showCmd(token, alias, isRotate) {
   $("cmd_title").textContent = (isRotate ? "新的安装命令" : "节点已创建") + (alias ? " · " + alias : "");

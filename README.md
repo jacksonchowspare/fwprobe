@@ -78,10 +78,11 @@ sudo python3 /usr/local/lib/fwprobe/probe.py addnode --alias "香港-1" --group 
 
 ```bash
 curl -fsSL https://status.example.com/install-agent.sh | sudo bash -s -- \
-     --token <节点token> --server https://status.example.com
+     --token <节点token> --server https://status.example.com --as-user fwprobe
 ```
 
-在被监控机器上执行即可。agent 装到 `/usr/local/lib/fwprobe-agent/`，
+在被监控机器上**用普通用户 + sudo** 执行即可（会要一次密码）。`--as-user fwprobe` 让服务以专用
+系统用户运行、只保留 `CAP_NET_RAW`（ICMP 用），去掉这段就是 root 模式。agent 装到 `/usr/local/lib/fwprobe-agent/`，
 配置在 `/etc/fwprobe-agent/config.json`（600），服务名 `fwprobe-agent`。
 
 常用命令：

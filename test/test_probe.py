@@ -1111,6 +1111,7 @@ class TestHTTP(unittest.TestCase):
         d = json.loads(body)
         self.assertTrue(d["command"].startswith("curl -fsSL "))
         self.assertIn(d["token"], d["command"])
+        self.assertIn("--as-user fwprobe", d["command"])   # 新机器默认低权限安装
         node = self.st.node(d["id"])
         self.assertEqual(P.parse_groups(node["groups"]), ["HK"])
         self.assertIn("fwpanel2", node["note"])

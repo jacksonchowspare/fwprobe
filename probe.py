@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.27"
+VERSION = "0.5.28"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1809,7 +1809,8 @@ class Handler(BaseHTTPRequestHandler):
                              self._peer_ip())
             return self._send(200, {"id": nid, "token": tok, "server": base,
                                     "command": f"curl -fsSL {base}/install-agent.sh | "
-                                               f"sudo bash -s -- --token {tok} --server {base}"})
+                                               f"sudo bash -s -- --token {tok} --server {base} "
+                                               f"--as-user fwprobe"})
         if path == "/api/nodes":                      # 管理：新增节点
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
@@ -2100,7 +2101,7 @@ def cmd_addnode(args):
     base = (args.server or cfg.get("base_url") or "https://status.example.com").rstrip("/")
     print(f"节点已创建\n  id    : {nid}\n  alias : {args.alias}")
     print(f"\n该节点的安装命令（token 只显示这一次，请立即保存）：\n"
-          f"  curl -fsSL {base}/install-agent.sh | sudo bash -s -- --token {tok} --server {base}\n")
+          f"  curl -fsSL {base}/install-agent.sh | sudo bash -s -- --token {tok} --server {base} --as-user fwprobe\n")
     return 0
 
 
@@ -2181,7 +2182,7 @@ def cmd_rmtoken(args):
         return 1
     base = (cfg.get("base_url") or "https://status.example.com").rstrip("/")
     print(f"新 token（旧 agent 立即失效，重新安装或改配置后重启 agent）：\n"
-          f"  curl -fsSL {base}/install-agent.sh | sudo bash -s -- --token {tok} --server {base}")
+          f"  curl -fsSL {base}/install-agent.sh | sudo bash -s -- --token {tok} --server {base} --as-user fwprobe")
     return 0
 
 
