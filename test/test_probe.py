@@ -626,6 +626,14 @@ class TestHTTP(unittest.TestCase):
         code, body = self._post("/api/admin/login", {"password": "wrong-one"}, csrf=False)
         self.assertEqual(code, 401, body)
 
+    def test_admin_meta_is_get_able(self):
+        """GET /api/admin/meta 必须存在：后台靠它拿 agent 版本，404 就永远没有「全部升级」按钮"""
+        code, body = self._get("/api/admin/meta", token="admin-test")
+        self.assertEqual(code, 200, body)
+        d = json.loads(body)
+        self.assertIn("agent_version", d)
+        self.assertIn("version", d)
+
     def test_report_pushes_targets(self):
         """0.5.11+ 的 agent 上报带 targets_ver：版本不一致就下发；一致/老 agent 不下发"""
         code, body = self._post("/api/report", {"agent": "0.5.11", "ts": int(time.time()),

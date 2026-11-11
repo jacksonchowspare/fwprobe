@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.21"
+VERSION = "0.5.22"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1275,6 +1275,14 @@ class Handler(BaseHTTPRequestHandler):
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
             return self._send(200, {"items": self.store.targets(), "ver": self.store.targets_ver()})
+        if path == "/api/admin/meta":
+            # ⚠ 前端 load() 是用 GET 拉的；只挂在 do_POST 上的话一律 404 → META.agent_version 为空
+            #   → 后台永远不显示「全部升级」按钮（v0.5.5~v0.5.21 一直如此，2026-11-11 才被发现）
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            meta_ver, meta_sha = agent_file_meta()
+            return self._send(200, {"version": VERSION, "agent_version": meta_ver,
+                                    "agent_sha256": meta_sha})
         if path == "/api/admin/groups":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
