@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.31"
+VERSION = "0.5.32"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +101,12 @@ CREATE TABLE IF NOT EXISTS targets (          -- 三网探测目标（中心统�
     family     TEXT DEFAULT 'auto',-- auto | 4 | 6
     enabled    INTEGER DEFAULT 1,
     sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS aliases (          -- 目标改过的旧名字 → 现在的名字（历史数据归一用）
+    old  TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    ts   INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS traffic_hist (   -- 每台机器已结束的配额周期用量（月/年周期也要能看历史）
@@ -241,6 +247,28 @@ TARGET_MAX = 6
 def target_name(op, region):
     op, region = (op or "").strip(), (region or "").strip()
     return f"{op}·{region}" if (op and region) else (op or region)
+
+
+def guess_target_alias(name, targets):
+    """旧名字 → 现在的目标名。只认老默认格式（地区+运营商 / 运营商+地区，含 v6 后缀），
+    避免把用户自己起的名字误并。"""
+    n = str(name or "").strip()
+    if not n:
+        return None
+    for t in targets or []:
+        op = (t.get("op") or "").strip()
+        region = (t.get("region") or "").strip()
+        tn = t.get("name")
+        if not op or not region or not tn:
+            continue
+        base = region[:-2] if region.endswith("v6") else region
+        suf = "v6" if region.endswith("v6") else ""
+        cands = {region + op, op + region, region + "·" + op, op + "·" + region,
+                 base + op + suf, op + base + suf,
+                 base + op + "IPv6", op + base + "IPv6", base + op + "(IPv6)"}
+        if n in cands and n != tn:
+            return tn
+    return None
 
 
 def clean_target(t, idx=0):
@@ -503,6 +531,7 @@ class Store:
         self.conn.executescript(SCHEMA)
         self.conn.commit()
         self._migrate()
+        self.repair_aliases()
 
     # -- 节点 ---------------------------------------------------------------
     def add_node(self, alias, grp="", quota_bytes=0, expires_at="", note="", groups=None, tags=None,
@@ -683,12 +712,58 @@ class Store:
                 for t in clean:
                     old_name = old.get(t["id"])
                     if old_name and old_name != t["name"]:
-                        for table in ("checks", "checks_min"):
-                            self.conn.execute(f"UPDATE {table} SET name=? WHERE name=?",
-                                              (t["name"], old_name))
+                        # 记别名 + 把两张检查表里的旧名字一起改掉（内部幂等）
+                        self.record_alias(old_name, t["name"])
                         renamed.append([old_name, t["name"]])
             self.conn.commit()
         return self.targets_ver(), renamed
+
+    # -- 目标改名的历史名归一 ------------------------------------------------
+    def alias_map(self):
+        with self.lock:
+            return {r["old"]: r["name"] for r in self.conn.execute("SELECT old,name FROM aliases")}
+
+    def record_alias(self, old, name):
+        """记下「旧名 → 新名」：以后 agent 再用旧名上报也会落成新名，库里的老数据也并过去。"""
+        if not old or not name or old == name:
+            return False
+        with self.lock:
+            self.conn.execute("INSERT OR REPLACE INTO aliases(old,name,ts) VALUES(?,?,?)",
+                              (old, name, int(time.time())))
+            self.conn.execute("UPDATE aliases SET name=? WHERE name=?", (name, old))  # 链式改名
+            for table in ("checks", "checks_min"):
+                self.conn.execute(f"UPDATE {table} SET name=? WHERE name=?", (name, old))
+            self.conn.commit()
+        return True
+
+    def repair_aliases(self):
+        """把库里还在用旧名字的检查数据归一（早期改名留下的孤儿名，会让详情页曲线出现两套）。
+
+        规则保守：只有旧名恰好等于某目标的「地区+运营商」「运营商+地区」（含 v6 后缀）才并，
+        其余（用户自己起的名字、已删除的目标）一律不动。"""
+        try:
+            with self.lock:
+                names = {r["name"] for r in self.conn.execute("SELECT name FROM targets")}
+                known = {r["old"] for r in self.conn.execute("SELECT old FROM aliases")}
+                orphans = set()
+                for table in ("checks", "checks_min"):
+                    for r in self.conn.execute(f"SELECT DISTINCT name FROM {table}"):
+                        if r["name"] not in names and r["name"] not in known:
+                            orphans.add(r["name"])
+            if not orphans:
+                return []
+            tg = self.targets()
+            fixed = []
+            for o in orphans:
+                new = guess_target_alias(o, tg)
+                if new and new != o and self.record_alias(o, new):
+                    fixed.append([o, new])
+            if fixed:
+                print(f"[aliases] 历史名已归一：{fixed}", file=sys.stderr, flush=True)
+            return fixed
+        except Exception as exc:          # 清理失败不能拦住服务启动
+            print(f"[aliases] 归一历史名失败：{exc}", file=sys.stderr, flush=True)
+            return []
 
     def node(self, nid):
         with self.lock:
@@ -790,6 +865,7 @@ class Store:
         if abs(now - ts) > 600:
             ts = now
         with self.lock:
+            amap = {r["old"]: r["name"] for r in self.conn.execute("SELECT old,name FROM aliases")}
             self.conn.execute(
                 "INSERT OR REPLACE INTO samples(node_id,ts,cpu,cpu_cores,mem_used,mem_total,"
                 "swap_used,swap_total,disk_used,disk_total,load1,load5,load15,iface,rx_bps,tx_bps,"
@@ -813,10 +889,12 @@ class Store:
             if abs(cts - now) > 600:
                 cts = ts                      # 补发/时钟漂移，拉回本次上报时刻
             for c in (payload.get("checks") or []):
+                cname = (c.get("name") or "?")[:32]
+                cname = amap.get(cname, cname)          # 旧名字自动落到新名字上（改名后不再出现两套曲线）
                 self.conn.execute(
                     "INSERT OR REPLACE INTO checks(node_id,ts,name,proto,host,port,family,ok,loss,rmin,ravg,rmax)"
                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (node["id"], cts, (c.get("name") or "?")[:32], c.get("proto"), c.get("host"),
+                    (node["id"], cts, cname, c.get("proto"), c.get("host"),
                      c.get("port"), c.get("family"), 1 if c.get("ok") else 0,
                      c.get("loss"), c.get("min"), c.get("avg"), c.get("max")))
             net = payload.get("net") or {}
@@ -1047,6 +1125,7 @@ class Store:
         since = now - span * 3600
         table = "samples" if span <= 24 else ("samples_min" if span <= 24 * 10 else "samples_hour")
         with self.lock:
+            amap = {r["old"]: r["name"] for r in self.conn.execute("SELECT old,name FROM aliases")}
             rows = self.conn.execute(
                 f"SELECT ts,cpu,mem_used,mem_total,disk_used,disk_total,load1,rx_bps,tx_bps,tcp,udp"
                 f" FROM {table} WHERE node_id=? AND ts>=? ORDER BY ts", (nid, since)).fetchall()
@@ -1061,8 +1140,14 @@ class Store:
                    "tcp": r["tcp"], "udp": r["udp"]} for r in rows]
         checks = {}
         for r in crows:
-            checks.setdefault(r["name"], []).append(
+            nm = amap.get(r["name"], r["name"])          # 旧名字并到新名字（双重保险）
+            checks.setdefault(nm, []).append(
                 {"ts": r["ts"], "ok": r["ok"], "loss": r["loss"], "avg": r["ravg"], "max": r["rmax"]})
+        for k, v in list(checks.items()):       # 旧名新名并到一起后同一时刻可能重复，去重
+            if len(v) > 1:
+                uniq = {p["ts"]: p for p in v}
+                if len(uniq) != len(v):
+                    checks[k] = [uniq[ts] for ts in sorted(uniq)]
         points = downsample(points, MAX_SERIES_POINTS,
                             ("cpu", "mem", "mem_total", "disk", "disk_total", "load1", "rx", "tx", "tcp", "udp"))
         for name in list(checks):

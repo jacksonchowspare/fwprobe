@@ -643,6 +643,78 @@ class TestLowPrivAgent(unittest.TestCase):
                                         capture_output=True).returncode, 0)
 
 
+class TestTargetAliases(unittest.TestCase):
+    """目标改名后旧名字的数据要并到新名字，详情页不能再出现「上海电信」和「电信·上海」两套曲线"""
+
+    def setUp(self):
+        self.st, self.dir = mk_store()
+        self.st.seed_targets()
+        self.nid, _ = self.st.add_node("a")
+        self.node = self.st.node(self.nid)
+
+    def tearDown(self):
+        self.st.conn.close()
+
+    def _orphans(self):
+        with self.st.lock:
+            return [r["name"] for r in self.st.conn.execute(
+                "SELECT DISTINCT name FROM checks ORDER BY name")]
+
+    def test_repair_folds_old_default_names(self):
+        now = int(time.time())
+        for name in ("上海电信", "上海联通", "上海移动"):
+            self.st.conn.execute(
+                "INSERT OR REPLACE INTO checks(node_id,ts,name,ok,loss,rmin,ravg,rmax)"
+                " VALUES(?,?,?,?,?,?,?,?)", (self.nid, now, name, 1, 0.0, 30.0, 30.0, 30.0))
+        self.st.conn.commit()
+        fixed = dict(self.st.repair_aliases())
+        self.assertEqual(fixed["上海电信"], "电信·上海")
+        self.assertEqual(fixed["上海联通"], "联通·上海")
+        self.assertEqual(fixed["上海移动"], "移动·上海")
+        self.assertEqual(sorted(self._orphans()), sorted(["电信·上海", "联通·上海", "移动·上海"]))
+        self.assertEqual(self.st.series(self.nid, 1)["checks"].keys(), {"电信·上海", "联通·上海", "移动·上海"})
+        # 幂等：再跑一次不会重复并
+        self.assertEqual(self.st.repair_aliases(), [])
+
+    def test_ingest_maps_old_name_after_alias(self):
+        """改名后老 agent 还用旧名上报：落库时直接换成新名，不会另起一条曲线"""
+        self.st.record_alias("上海电信", "电信·上海")
+        now = int(time.time())
+        p = payload(checks=[{"name": "上海电信", "proto": "tcp", "host": "a.example", "port": 80,
+                             "family": "4", "ok": True, "loss": 0.0, "min": 29.0, "avg": 30.5,
+                             "max": 32.0}])
+        p["ts"] = now
+        self.st.ingest(self.node, p, "1.1.1.1")
+        self.assertEqual(self._orphans(), ["电信·上海"])
+
+    def test_rename_moves_history_and_records_alias(self):
+        now = int(time.time())
+        self.st.conn.execute(
+            "INSERT OR REPLACE INTO checks(node_id,ts,name,ok,loss,rmin,ravg,rmax)"
+            " VALUES(?,?,?,?,?,?,?,?)", (self.nid, now, "电信·上海", 1, 0.0, 20.0, 20.0, 20.0))
+        self.st.conn.commit()
+        items = [dict(t) for t in self.st.targets()]
+        for t in items:
+            if t["id"] == "ct4":
+                t["region"] = "北京"
+        ver, renamed = self.st.save_targets(items, rename_history=True)
+        self.assertIn(["电信·上海", "电信·北京"], renamed)
+        self.assertEqual(self._orphans(), ["电信·北京"])
+        self.assertEqual(self.st.alias_map().get("电信·上海"), "电信·北京")
+        # 之后 agent 还报旧名也不会长出新的一条
+        p = payload(checks=[{"name": "电信·上海", "proto": "tcp", "host": "a.example", "port": 80,
+                             "family": "4", "ok": True, "loss": 0.0, "min": 1.0, "avg": 2.0,
+                             "max": 3.0}])
+        p["ts"] = now + 5
+        self.st.ingest(self.node, p, "1.1.1.1")
+        self.assertEqual(self._orphans(), ["电信·北京"])
+
+    def test_guess_alias_ignores_custom_names(self):
+        tg = self.st.targets()
+        self.assertIsNone(P.guess_target_alias("我的线路A", tg))
+        self.assertEqual(P.guess_target_alias("上海电信v6", tg), "电信·上海v6")
+
+
 class TestOrdering(unittest.TestCase):
     """展示页卡片顺序（v0.5.19）：后台拖动 → nodes.sort_order → 公开页按序渲染"""
 
