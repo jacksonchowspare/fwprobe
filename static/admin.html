@@ -120,8 +120,10 @@
   <!-- 登录 -->
   <div id="login" class="panel" hidden>
     <h1>iProbe 后台</h1>
-    <div class="muted small">用后台密码或管理 token 登录。忘了密码可在服务器执行 <code>probe.py passwd</code> 重设，
-      不知道 token 可执行 <code>probe.py token</code> 查看。</div>
+    <div class="muted small">用后台密码或管理 token 登录（两者都填密码框）。没设过密码或忘了密码：在服务器执行
+      <code>sudo iprobe passwd</code> 重设；不知道 token 用 <code>sudo iprobe token</code> 查看。
+      没有 <code>iprobe</code> 命令就用完整路径 <code>sudo python3 /usr/local/lib/fwprobe/probe.py passwd</code>。
+      改完立即生效，不用重启服务。</div>
     <div class="row"><input id="tok" type="password" placeholder="密码 / 管理 token" autocomplete="current-password"></div>
     <div class="row" style="display:flex;align-items:center;gap:8px">
       <input id="remember" type="checkbox" style="width:auto;margin:0">

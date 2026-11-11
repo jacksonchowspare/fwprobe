@@ -367,6 +367,44 @@ class TestCountryDetect(unittest.TestCase):
         self.assertEqual(P.norm_country("JPN"), "")
 
 
+class TestConfigHotReload(unittest.TestCase):
+    """CLI 改密码后不用重启服务（旧版只在启动时读一次 config.json，用户改完密码仍登不进去）"""
+
+    def test_password_applies_without_restart(self):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "w") as fh:
+            json.dump({"admin_token": "t0", "admin_password": ""}, fh)
+        orig = P.CONFIG_PATH
+        P.CONFIG_PATH = path
+        try:
+            srv = P.Server(("127.0.0.1", 0), P.Handler, None, P.load_config())
+            try:
+                self.assertEqual(srv.cfg().get("admin_password"), "")
+                with open(path, "w") as fh:
+                    json.dump({"admin_token": "t0", "admin_password": "h-new"}, fh)
+                future = time.time() + 5
+                os.utime(path, (future, future))
+                self.assertEqual(srv.cfg().get("admin_password"), "h-new")
+                self.assertEqual(srv.cfg().get("admin_token"), "t0")   # 文件里有的键不能被默认值冲掉
+            finally:
+                srv.server_close()
+        finally:
+            P.CONFIG_PATH = orig
+
+    def test_missing_config_is_harmless(self):
+        orig = P.CONFIG_PATH
+        P.CONFIG_PATH = "/nonexistent/fwprobe/config.json"
+        try:
+            srv = P.Server(("127.0.0.1", 0), P.Handler, None, {"admin_token": "keep"})
+            try:
+                self.assertEqual(srv.cfg().get("admin_token"), "keep")
+            finally:
+                srv.server_close()
+        finally:
+            P.CONFIG_PATH = orig
+
+
 class TestAdminPage(unittest.TestCase):
     """后台静态页自检：地区选择器与地区列必须真的在位（v0.5.18）"""
 
@@ -405,6 +443,20 @@ class TestHTTP(unittest.TestCase):
         P.detect_country = lambda ip: ("", "", "test-disabled")
         self.addCleanup(lambda: setattr(P, "detect_country", _orig_detect))
         self.addCleanup(P.reset_country_schedule)
+
+    def test_login_accepts_hot_reloaded_password(self):
+        """服务器上刚 passwd 完就能登：登录前会按 config.json 的 mtime 重读"""
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "w") as fh:
+            json.dump({"admin_password": P.hash_password("newpass123")}, fh)
+        orig = P.CONFIG_PATH
+        P.CONFIG_PATH = path
+        self.addCleanup(lambda: setattr(P, "CONFIG_PATH", orig))
+        code, body = self._post("/api/admin/login", {"password": "newpass123"}, csrf=False)
+        self.assertEqual(code, 200, body)
+        code, body = self._post("/api/admin/login", {"password": "wrong-one"}, csrf=False)
+        self.assertEqual(code, 401, body)
 
     def tearDown(self):
         self.srv.shutdown()

@@ -92,6 +92,10 @@ for f in "$SRC_DIR"/static/*; do
 done
 ok "程序 → $APP_DIR"
 
+# 短命令：早期用户直接敲 probe.py 会 command not found（它装在 APP_DIR，不在 PATH 里）
+ln -sf "$APP_DIR/probe.py" /usr/local/bin/iprobe
+ok "命令 → /usr/local/bin/iprobe（iprobe token / iprobe passwd / iprobe listnodes）"
+
 step "3. 配置文件"
 python3 - "$ETC_DIR/config.json" "$PORT" "$BIND" "$BASE_URL" <<'PY'
 import json, os, secrets, sys

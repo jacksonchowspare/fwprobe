@@ -153,21 +153,34 @@ CREATE TABLE IF NOT EXISTS incidents (
 
 
 # --------------------------------------------------------------------------- 配置
+def read_config_file():
+    """只读配置文件里实际存在的键（热加载用，避免默认值把内存里的值冲掉）。"""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh) or {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:                      # 配置坏了不能让服务起不来
+        print(f"[warn] 读取配置失败（用默认值）: {exc}", file=sys.stderr)
+        return {}
+
+
 def load_config():
     cfg = {"port": DEFAULT_PORT, "bind": DEFAULT_BIND,
            "db": "/var/lib/fwprobe/probe.db", "base_url": "", "admin_token": ""}
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-            cfg.update(json.load(fh) or {})
-    except FileNotFoundError:
-        pass
-    except Exception as exc:                      # 配置坏了不能让服务起不来
-        print(f"[warn] 读取配置失败（用默认值）: {exc}", file=sys.stderr)
+    cfg.update(read_config_file())
     cfg["port"] = int(os.environ.get("FWPROBE_PORT", cfg.get("port") or DEFAULT_PORT))
     cfg["bind"] = os.environ.get("FWPROBE_BIND", cfg.get("bind") or DEFAULT_BIND)
     cfg["db"] = os.environ.get("FWPROBE_DB", cfg.get("db"))
     cfg["admin_token"] = os.environ.get("FWPROBE_ADMIN_TOKEN", cfg.get("admin_token") or "")
     return cfg
+
+
+def _cfg_mtime():
+    try:
+        return os.path.getmtime(CONFIG_PATH)
+    except OSError:
+        return 0
 
 
 # --------------------------------------------------------------------------- 存储
@@ -995,7 +1008,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _admin_ok(self):
         """两种凭证都收：Authorization: Bearer <admin_token>，或登录后的会话 Cookie（后台页面用后者）"""
-        tok = self.server.config.get("admin_token") or ""
+        tok = self.server.cfg().get("admin_token") or ""
         if not tok:
             return False
         if secrets.compare_digest(self._bearer(), tok):
@@ -1097,7 +1110,7 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 return self._send(429, {"error": f"尝试过于频繁，请 {wait // 60 + 1} 分钟后再试"})
             data = self._json_body() or {}
-            cfg = self.server.config
+            cfg = self.server.cfg()
             tok = cfg.get("admin_token") or ""
             given = str(data.get("password") or data.get("token") or "").strip()
             pw_hash = cfg.get("admin_password") or ""
@@ -1125,7 +1138,7 @@ class Handler(BaseHTTPRequestHandler):
             data = self._json_body() or {}
             old_pw = str(data.get("old") or "").strip()
             new_pw = str(data.get("new") or "")
-            cfg = self.server.config
+            cfg = self.server.cfg()
             tok = cfg.get("admin_token") or ""
             pw_hash = cfg.get("admin_password") or ""
             ok_old = (bool(pw_hash) and verify_password(old_pw, pw_hash)) or \
@@ -1212,7 +1225,7 @@ class Handler(BaseHTTPRequestHandler):
             if tgt and agent_ver and agent_ver == tgt:
                 self.store.update_node(node["id"], target_ver="")     # 升级完成，撤掉标记
             elif tgt and meta_ver and tgt == meta_ver and agent_ver != meta_ver:
-                base = (self.server.config.get("base_url") or "").rstrip("/")
+                base = (self.server.cfg().get("base_url") or "").rstrip("/")
                 resp["upgrade"] = {"version": meta_ver,
                                    "url": base + "/agent.py",
                                    "sha256": meta_sha}
@@ -1270,7 +1283,7 @@ class Handler(BaseHTTPRequestHandler):
             src = (data.get("source") or "").strip()[:64]
             if src:
                 self.store.update_node(nid, src=src)
-            base = (self.server.config.get("base_url") or "").rstrip("/")
+            base = (self.server.cfg().get("base_url") or "").rstrip("/")
             self.store.audit("provision", alias, f"id={nid} via {ptok.get('label') or ptok.get('id')}",
                              self._peer_ip())
             return self._send(200, {"id": nid, "token": tok, "server": base,
@@ -1447,6 +1460,24 @@ class Server(ThreadingHTTPServer):
         super().__init__(addr, handler)
         self.store = store
         self.config = config
+        self._cfg_mtime = _cfg_mtime()
+
+    def cfg(self):
+        """配置热加载：CLI 里 `probe.py passwd / token` 只改文件，服务不重启也得生效。
+
+        ⚠ 早期只在启动时读一次 config.json → 改完密码登录仍报「密码不正确」，用户以为密码错了
+        （实测坑：2026-11-11 CC1）。这里按 mtime 变化惰性重读，登录/token 校验前都会走一遍。
+        """
+        mt = _cfg_mtime()
+        if mt and mt != self._cfg_mtime:
+            try:
+                fresh = read_config_file()
+                self.config.update(fresh)
+                self._cfg_mtime = mt
+                log(f"配置已热加载：{CONFIG_PATH}")
+            except Exception as exc:
+                log(f"配置热加载失败：{exc}")
+        return self.config
 
 
 def maintenance_loop(store, stop: threading.Event, every=300):
@@ -1524,7 +1555,7 @@ def cmd_passwd(args):
         return 2
     cfg["admin_password"] = hash_password(p1)
     save_config(cfg)
-    print("已设置后台登录密码（只存哈希，明文不落盘）。")
+    print("已设置后台登录密码（只存哈希，明文不落盘）。服务会按文件变化自动热加载，登录立即生效。")
     return 0
 
 
