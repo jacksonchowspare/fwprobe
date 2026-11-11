@@ -184,6 +184,7 @@
         <button id="cc_all" onclick="refreshCountryAll()" hidden></button>
         <span class="sp"></span>
         <span class="muted small" id="counts"></span>
+        <span class="muted small" id="upd" title="后台会自动刷新：平时 15 秒，有节点在升级时 5 秒（标签页隐藏时暂停）"></span>
       </div>
       <table>
         <thead><tr>
@@ -478,12 +479,29 @@ async function load() {
   if (r1.status === 401) { $("main").hidden = true; $("login").hidden = false; return; }
   NODES = ((await r1.json()).nodes || []);
   GROUPS = (await r2.json()).groups || [];
-  META = (await r3.json().catch(() => ({}))) || {agent_version: ""};
+  const data = (await r3.json().catch(() => ({}))) || {};
+  META = Object.assign({agent_version: ""}, data);
   renderRows();
+  scheduleRefresh();
+}
+let REFRESH_T = null;
+function scheduleRefresh() {
+  // 页面自己会刷新：平时 15 秒，有节点在升级时 5 秒；弹窗开着 / 标签页在后台时先跳过，避免打断输入
+  if (REFRESH_T) clearTimeout(REFRESH_T);
+  const pending = NODES.some(n => n.target_ver);
+  REFRESH_T = setTimeout(async () => {
+    if (document.hidden || $("main").hidden || document.querySelector(".mask.show")) {
+      scheduleRefresh();
+      return;
+    }
+    try { await load(); } catch (e) { scheduleRefresh(); }
+  }, pending ? 5000 : 15000);
 }
 function renderRows() {
   $("empty").hidden = NODES.length > 0;
   $("counts").textContent = NODES.length ? `共 ${NODES.length} 台` : "";
+  const upd = $("upd");
+  if (upd) upd.textContent = "· 更新 " + new Date().toLocaleTimeString("zh-CN", {hour12: false});
   const noCc = NODES.filter(n => !n.country).length;
   const ccBtn = $("cc_all");
   ccBtn.hidden = noCc === 0;
@@ -512,7 +530,7 @@ function renderRows() {
         <span class="small">${n.online ? "在线" : "离线 · " + ago(n.last_seen)}</span></td>
       <td data-k="Agent" class="small ${needUp ? "" : "muted"}">${esc(n.agent_ver || "—")}
         ${n.pending_uninstall ? `<div class="tag" style="color:var(--bad);border-color:#f8717155;background:#f871711f;margin-top:2px">待卸载（等上报）</div>` : ""}
-        ${n.target_ver ? `<div class="tag" style="color:var(--warn);border-color:#fbbf2455;background:#fbbf241f;margin-top:2px">升级中 → ${esc(n.target_ver)}</div>`
+        ${n.target_ver ? `<div class="tag" title="已排队：节点下次上报（≤30 秒）就会下载新版本、校验后重启自己" style="color:var(--warn);border-color:#fbbf2455;background:#fbbf241f;margin-top:2px">升级中 → ${esc(n.target_ver)}</div>`
           : needUp ? `<div class="muted" style="font-size:11.5px">可升到 ${esc(META.agent_version)}</div>` : ""}</td>
       <td data-k="到期/配额" class="small">${esc(exp)}<div class="muted">${quota}</div></td>
       <td data-k="操作"><div class="ops">
@@ -957,6 +975,9 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") { const p = $("ed_country_pop"); if (p) p.hidden = true; }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !$("main").hidden) load();   // 切回来立刻刷新一次，不用等 15 秒
   });
   boot();
 });
