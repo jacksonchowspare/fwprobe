@@ -297,6 +297,9 @@ class TestStaticPage(unittest.TestCase):
     def test_strip_styles_present(self):
         self.assertIn(".strip{display:block", self.src)
         self.assertIn(".strip rect.live", self.src)
+        # 详情页返回后必须重排小方块：列表隐藏时量不到宽度，不重排就永久空白
+        self.assertIn("STRIPS_DIRTY", self.src)
+        self.assertIn("relayoutStrips();", self.src)
         self.assertNotIn(".cells{display:flex", self.src)   # 旧的 flex 格子实现已废弃
 
 

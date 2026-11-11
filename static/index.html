@@ -429,12 +429,15 @@ function strip(hist, kind, n) {
 function layoutStrips() {
   const dpr = window.devicePixelRatio || 1;
   const MAX_SIDE = Math.round(12 * dpr);        // 方块最大 12 CSS px
+  STRIPS_DIRTY = false;
   document.querySelectorAll("svg.strip").forEach(svg => {
     const cells = STRIP_CELLS[svg.dataset.sid];
     if (!cells || !cells.length) return;
     svg.style.width = "100%";                   // 先恢复自适应宽度再量
     const cssW = svg.clientWidth || (svg.parentNode && svg.parentNode.clientWidth) || 0;
-    if (!cssW) return;
+    // 详情页打开时列表是 display:none，量到的宽度是 0 —— 直接 return 会把方块永久留空，
+    // 所以记个脏标记，等列表重新显示时（route / visibilitychange）再排一次
+    if (!cssW) { STRIPS_DIRTY = true; return; }
     const n = cells.length;
     const W = Math.max(n * 2, Math.round(cssW * dpr));
     svg.style.width = (W / dpr) + "px";         // viewBox 与实际像素必须 1:1
@@ -459,6 +462,10 @@ function layoutStrips() {
 }
 
 let _stripTimer = 0;
+let STRIPS_DIRTY = false;        // 列表隐藏时量不到宽度 → 等它回来再排一次
+function relayoutStrips() {      // 等布局算完再量，否则拿到的还是旧宽度（详情页返回时必用）
+  requestAnimationFrame(layoutStrips);
+}
 window.addEventListener("resize", () => {
   clearTimeout(_stripTimer);
   _stripTimer = setTimeout(layoutStrips, 120);
@@ -1122,6 +1129,8 @@ function route() {
     $("nodes").style.display = "";
     $("filters").style.display = "";
     if (DETAIL_TIMER) { clearInterval(DETAIL_TIMER); DETAIL_TIMER = null; }
+    // ⚠ 详情页期间列表是隐藏的，小方块量不到宽度会留空；返回后必须重排一次
+    relayoutStrips();
   }
 }
 
@@ -1147,7 +1156,10 @@ setInterval(() => {
 }, 1000);
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) { loadSummary(); if (location.hash) loadDetail(); }
+  if (!document.hidden) {
+    loadSummary();
+    if (location.hash) loadDetail(); else relayoutStrips();
+  }
 });
 
 readFilterFromUrl();
