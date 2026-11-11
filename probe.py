@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import argparse
+import calendar
+import datetime
 import gzip
 import hashlib
 import hmac
@@ -37,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.23"
+VERSION = "0.5.24"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,8 +67,17 @@ CREATE TABLE IF NOT EXISTS nodes (
     hostname    TEXT DEFAULT '',
     public_ip   TEXT DEFAULT '',
     country     TEXT DEFAULT '',
-    quota_bytes INTEGER DEFAULT 0,      -- 0 = 不限量
-    expires_at  TEXT DEFAULT '',        -- YYYY-MM-DD，空 = 未填
+    quota_bytes INTEGER DEFAULT 0,      -- 0 = 不限量（每个周期的额度）
+    quota_mode  TEXT DEFAULT '',        -- day|month|year = 配额按周期统计，空 = 只累计不切周期
+    quota_start TEXT DEFAULT '',        -- 周期起始日 YYYY-MM-DD（如 2026-11-11 + month → 每月 11 日 00:00 重置）
+    expires_at  TEXT DEFAULT '',        -- YYYY-MM-DD，空 = 未填（不滚动时用这个死日期）
+    renew_mode  TEXT DEFAULT '',        -- day|month|year = 到期日自动往后滚，空 = 不滚
+    renew_start TEXT DEFAULT '',        -- 首次到期日 YYYY-MM-DD（滚动的起点）
+    cyc_start   INTEGER DEFAULT 0,      -- 当前周期起点 ts
+    cyc_rx      INTEGER DEFAULT 0,      -- 本周期出站字节
+    cyc_tx      INTEGER DEFAULT 0,      -- 本周期入站字节
+    last_rx_total INTEGER DEFAULT -1,   -- agent 上次上报的累计计数器（识别重启归零）
+    last_tx_total INTEGER DEFAULT -1,
     agent_ver   TEXT DEFAULT '',
     target_ver  TEXT DEFAULT '',      -- 升级目标版本，agent 升到后清空
     pending_uninstall INTEGER DEFAULT 0,  -- 中心点了「卸载探针」，等 agent 下次上报执行
@@ -89,6 +100,15 @@ CREATE TABLE IF NOT EXISTS targets (          -- 三网探测目标（中心统�
     family     TEXT DEFAULT 'auto',-- auto | 4 | 6
     enabled    INTEGER DEFAULT 1,
     sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS traffic_hist (   -- 每台机器已结束的配额周期用量（月/年周期也要能看历史）
+    node_id  TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts   INTEGER NOT NULL,
+    rx       INTEGER DEFAULT 0,
+    tx       INTEGER DEFAULT 0,
+    PRIMARY KEY (node_id, start_ts)
 );
 
 CREATE TABLE IF NOT EXISTS samples (
@@ -473,7 +493,8 @@ class Store:
         d = os.path.dirname(path)
         if d:
             os.makedirs(d, exist_ok=True)
-        self.lock = threading.Lock()
+        # RLock：ingest 持锁时还会调 account_traffic（也要锁），普通 Lock 会自锁死
+        self.lock = threading.RLock()
         self.conn = sqlite3.connect(path, check_same_thread=False, timeout=15)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -483,9 +504,17 @@ class Store:
         self._migrate()
 
     # -- 节点 ---------------------------------------------------------------
-    def add_node(self, alias, grp="", quota_bytes=0, expires_at="", note="", groups=None, tags=None):
+    def add_node(self, alias, grp="", quota_bytes=0, expires_at="", note="", groups=None, tags=None,
+                 quota_mode=None, quota_start="", renew_mode=None, renew_start=""):
+        """新节点默认：配额按月统计（起点=今天）、到期按月自动滚动（起点=到期日或今天）。
+        开关默认开启是用户明确要求：免费机每月自动往后滚，不用每月手改。"""
         nid = secrets.token_hex(6)
         tok = new_token()
+        today = local_date().isoformat()
+        quota_mode = "month" if quota_mode is None else str(quota_mode).strip().lower()
+        renew_mode = "month" if renew_mode is None else str(renew_mode).strip().lower()
+        quota_start = (quota_start or today)[:10]
+        renew_start = (renew_start or expires_at or today)[:10]
         glist = [g.strip() for g in (groups if groups is not None else ([grp] if grp else [])) if g and g.strip()]
         with self.lock:
             # 新节点排到展示页最后（老数据 sort_order 为 0 时也能排到最前，不会插队打乱已设顺序）
@@ -493,10 +522,11 @@ class Store:
             order = int((r["mx"] if r and r["mx"] is not None else 0) or 0) + 10
             self.conn.execute(
                 "INSERT INTO nodes(id,alias,grp,groups,tags,token_hash,quota_bytes,expires_at,note,"
-                "sort_order,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "sort_order,created,quota_mode,quota_start,renew_mode,renew_start)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (nid, alias, (glist[0] if glist else ""), dump_groups(glist), dump_tags(tags),
                  sha256_hex(tok), int(quota_bytes or 0), expires_at or "", note or "",
-                 order, int(time.time())))
+                 order, int(time.time()), quota_mode, quota_start, renew_mode, renew_start))
             self.conn.commit()
         return nid, tok
 
@@ -524,6 +554,32 @@ class Store:
         if "target_ver" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN target_ver TEXT DEFAULT ''")
             self.conn.commit()
+        # v0.5.24：配额周期 + 到期滚动
+        for col, ddl in (("quota_mode", "TEXT DEFAULT ''"), ("quota_start", "TEXT DEFAULT ''"),
+                         ("renew_mode", "TEXT DEFAULT ''"), ("renew_start", "TEXT DEFAULT ''"),
+                         ("cyc_start", "INTEGER DEFAULT 0"), ("cyc_rx", "INTEGER DEFAULT 0"),
+                         ("cyc_tx", "INTEGER DEFAULT 0"),
+                         ("last_rx_total", "INTEGER DEFAULT -1"),
+                         ("last_tx_total", "INTEGER DEFAULT -1")):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {ddl}")
+        self.conn.commit()
+        # 老节点：把最近保留样本的差值先记成本周期用量（否则卡片上会突然变成 0 B）
+        for r in self.conn.execute("SELECT id FROM nodes WHERE cyc_start IS NULL OR cyc_start=0"):
+            rx, tx = self.totals(r[0])
+            self.conn.execute("UPDATE nodes SET cyc_start=?,cyc_rx=?,cyc_tx=? WHERE id=?",
+                              (int(time.time()), int(rx), int(tx), r[0]))
+        self.conn.commit()
+        # 老节点先按"已用 0、计数器从当前值起步"初始化，第一次上报之后开始准确累计
+        for r in self.conn.execute("SELECT id FROM nodes WHERE last_rx_total IS NULL OR last_rx_total < 0"):
+            lr = self.conn.execute("SELECT rx_total,tx_total FROM samples WHERE node_id=?"
+                                   " ORDER BY ts DESC LIMIT 1", (r[0],)).fetchone()
+            if lr:
+                self.conn.execute("UPDATE nodes SET last_rx_total=?,last_tx_total=? WHERE id=?",
+                                  (int(lr[0] or 0), int(lr[1] or 0), r[0]))
+            else:
+                self.conn.execute("UPDATE nodes SET last_rx_total=0,last_tx_total=0 WHERE id=?", (r[0],))
+        self.conn.commit()
         if "pending_uninstall" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN pending_uninstall INTEGER DEFAULT 0")
             self.conn.commit()
@@ -651,6 +707,7 @@ class Store:
         if "tags" in fields:
             fields["tags"] = dump_tags(fields.pop("tags"))
         allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled",
+                   "quota_mode", "quota_start", "renew_mode", "renew_start",
                    "country", "country_src", "country_ip", "country_ts",
                    "tags", "target_ver", "pending_uninstall", "src"}
         kv = {k: v for k, v in fields.items() if k in allowed}
@@ -760,6 +817,9 @@ class Store:
                     (node["id"], cts, (c.get("name") or "?")[:32], c.get("proto"), c.get("host"),
                      c.get("port"), c.get("family"), 1 if c.get("ok") else 0,
                      c.get("loss"), c.get("min"), c.get("avg"), c.get("max")))
+            net = payload.get("net") or {}
+            if net.get("rx_total") is not None or net.get("tx_total") is not None:
+                self.account_traffic(node["id"], net.get("rx_total"), net.get("tx_total"))
             self.conn.execute(
                 "UPDATE nodes SET last_seen=?, os_id=COALESCE(NULLIF(?,''),os_id),"
                 " os_name=COALESCE(NULLIF(?,''),os_name), kernel=COALESCE(NULLIF(?,''),kernel),"
@@ -826,6 +886,70 @@ class Store:
         rx = max(0, (last["rx_total"] or 0) - (first["rx_total"] or 0))
         tx = max(0, (last["tx_total"] or 0) - (first["tx_total"] or 0))
         return rx, tx
+
+    def account_traffic(self, nid, rx_total, tx_total):
+        """把 agent 的累计计数器换算成「本周期用量」。
+        - 计数器归零（重启后 rx_total 变小）按从 0 开始累加，不会出现负数；
+        - 跨周期时把上一段归档进 traffic_hist 再清零，长期不进后台也不会丢数。"""
+        n = self.node(nid)
+        if not n:
+            return None
+        rx_total = max(0, int(rx_total or 0))
+        tx_total = max(0, int(tx_total or 0))
+        now = int(time.time())
+        cstart, _cend = cycle_bounds((n.get("quota_mode") or "").strip(), n.get("quota_start"), now)
+        cyc_start = int(n.get("cyc_start") or 0)
+        cyc_rx = int(n.get("cyc_rx") or 0)
+        cyc_tx = int(n.get("cyc_tx") or 0)
+        last_rx = int(n.get("last_rx_total") if n.get("last_rx_total") is not None else -1)
+        last_tx = int(n.get("last_tx_total") if n.get("last_tx_total") is not None else -1)
+        archived = None
+        if cstart and cyc_start and cstart > cyc_start:
+            with self.lock:
+                self.conn.execute("INSERT OR REPLACE INTO traffic_hist(node_id,start_ts,end_ts,rx,tx)"
+                                  " VALUES(?,?,?,?,?)",
+                                  (nid, cyc_start, min(cstart, now), cyc_rx, cyc_tx))
+                self.conn.commit()
+            archived = {"start": cyc_start, "end": min(cstart, now), "rx": cyc_rx, "tx": cyc_tx}
+            cyc_rx = cyc_tx = 0
+            cyc_start = cstart
+        if not cyc_start:
+            cyc_start = cstart or now
+        d_rx = (rx_total - last_rx) if (last_rx >= 0 and rx_total >= last_rx) else (rx_total if last_rx > 0 else 0)
+        d_tx = (tx_total - last_tx) if (last_tx >= 0 and tx_total >= last_tx) else (tx_total if last_tx > 0 else 0)
+        cyc_rx += max(0, d_rx)
+        cyc_tx += max(0, d_tx)
+        with self.lock:
+            self.conn.execute("UPDATE nodes SET cyc_start=?,cyc_rx=?,cyc_tx=?,"
+                              "last_rx_total=?,last_tx_total=? WHERE id=?",
+                              (cyc_start, cyc_rx, cyc_tx, rx_total, tx_total, nid))
+            self.conn.commit()
+        return archived
+
+    def cycle_info(self, n):
+        """本周期展示信息：起止、剩余天数、本期已用（rx+tx）"""
+        mode = (n.get("quota_mode") or "").strip()
+        if mode not in PERIOD_UNITS:
+            return {}
+        cstart, cend = cycle_bounds(mode, n.get("quota_start"))
+        if not cstart:
+            return {}
+        used = int(n.get("cyc_rx") or 0) + int(n.get("cyc_tx") or 0)
+        left = max(0, (local_date(cend) - local_date()).days)   # 按日历天数，别用 86400 折算
+        return {"mode": mode, "unit": UNIT_CN.get(mode, mode), "used": used,
+                "start": cstart, "end": cend,
+                "start_date": local_date(cstart).isoformat(),
+                "reset_date": local_date(cend).isoformat(),   # 这天 00:00 重置
+                "days_left": left}
+
+    def lifetime(self, nid):
+        """这台机器自本功能上线以来的总收发（归档周期 + 当前周期）"""
+        with self.lock:
+            r = self.conn.execute("SELECT COALESCE(SUM(rx),0) rx, COALESCE(SUM(tx),0) tx"
+                                  " FROM traffic_hist WHERE node_id=?", (nid,)).fetchone()
+            cur = self.conn.execute("SELECT cyc_rx,cyc_tx FROM nodes WHERE id=?", (nid,)).fetchone()
+        return int(r["rx"] or 0) + int((cur["cyc_rx"] if cur else 0) or 0), \
+               int(r["tx"] or 0) + int((cur["cyc_tx"] if cur else 0) or 0)
 
     def check_hist(self, nid, n=20):
         """每条探测线路最近 n 次的原始结果（旧→新），供详情页/调试用。"""
@@ -1084,6 +1208,102 @@ def lookup_country(ip: str):
     return detect_country(ip)[0]
 
 
+# --------------------------------------------------------------- 计费周期 / 到期滚动
+# 周期按 CST 切日：服务器多半是 UTC，直接用本地时间会让"每月 11 日重置"变成 11 日早上 8 点
+TZ_OFFSET_HOURS = 8
+PERIOD_UNITS = ("day", "month", "year")
+UNIT_CN = {"day": "每天", "month": "每月", "year": "每年"}
+
+
+def _tz():
+    return datetime.timezone(datetime.timedelta(hours=TZ_OFFSET_HOURS))
+
+
+def local_date(ts=None):
+    return datetime.datetime.fromtimestamp(int(ts if ts is not None else time.time()), _tz()).date()
+
+
+def day_start_ts(d):
+    return int(datetime.datetime(d.year, d.month, d.day, tzinfo=_tz()).timestamp())
+
+
+def parse_date(s):
+    s = str(s or "").strip()[:10]
+    if not s:
+        return None
+    try:
+        return datetime.date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def add_months(d, n):
+    """加 n 个月，日按月末回退（1-31 加一月 → 2-28/29）"""
+    m = d.month - 1 + n
+    y, m = d.year + m // 12, m % 12 + 1
+    return datetime.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def add_period(d, unit, n=1):
+    if unit == "day":
+        return d + datetime.timedelta(days=n)
+    if unit == "year":
+        try:
+            return d.replace(year=d.year + n)
+        except ValueError:                 # 2-29 → 2-28
+            return d.replace(year=d.year + n, day=28)
+    return add_months(d, n)
+
+
+def cycle_bounds(mode, start, now=None):
+    """当前配额周期 [start_ts, end_ts)：起始日 + 按 day/month/year 递推，跨过多个周期也只给当前这段。
+    mode 不是 day/month/year 时返回 (0, 0) = 不按周期。"""
+    if mode not in PERIOD_UNITS:
+        return 0, 0
+    today = local_date(now)
+    base = parse_date(start) or today
+    if base > today:                        # 起始日在未来：第一个周期从那天开始
+        return day_start_ts(base), day_start_ts(add_period(base, mode))
+    cur, guard = base, 0
+    while guard < 4000:
+        nxt = add_period(cur, mode)
+        if nxt > today:
+            break
+        cur, guard = nxt, guard + 1
+    return day_start_ts(cur), day_start_ts(add_period(cur, mode))
+
+
+def roll_forward(base, unit, today=None, after_today=False):
+    """到期日自动滚动：从 base 按单位往后推到 ≥ 今天。
+    after_today=True 时推到严格大于今天（到期日当天算已续到下一期，不会显示"今天到期"）。"""
+    if unit not in PERIOD_UNITS:
+        return parse_date(base)
+    d = parse_date(base)
+    if not d:
+        return None
+    today = today or local_date()
+    guard = 0
+    while guard < 4000 and (d < today or (after_today and d == today)):
+        d, guard = add_period(d, unit), guard + 1
+    return d
+
+
+def expires_info(n):
+    """对外展示的到期日：自动滚动时就给滚动后的那天 + 剩余天数"""
+    base = (n.get("renew_start") or "").strip() or (n.get("expires_at") or "").strip()
+    mode = (n.get("renew_mode") or "").strip()
+    if mode in PERIOD_UNITS and base:
+        eff = roll_forward(base, mode, after_today=True)
+        if eff:
+            return {"auto": True, "mode": mode, "base": base, "date": eff.isoformat(),
+                    "days_left": (eff - local_date()).days}
+    d = parse_date(base)
+    if d:
+        return {"auto": False, "mode": "", "base": base, "date": d.isoformat(),
+                "days_left": (d - local_date()).days}
+    return {"auto": False, "mode": "", "base": "", "date": "", "days_left": None}
+
+
 def is_private_ip(ip: str) -> bool:
     try:
         return ipaddress.ip_address(ip).is_private
@@ -1146,7 +1366,9 @@ def public_summary(store: Store):
             continue
         s, checks = store.latest(n["id"])
         online = bool(n.get("last_seen")) and (now - int(n["last_seen"]) < OFFLINE_AFTER)
-        rx, tx = store.totals(n["id"])
+        rx, tx = store.lifetime(n["id"])
+        cycle = store.cycle_info(n)
+        exp = expires_info(n)
         three = store.three(n["id"])
         for tname, tdata in (three.get("targets") or {}).items():
             op, order = opmap.get(tname, ("", 99))
@@ -1164,9 +1386,11 @@ def public_summary(store: Store):
             "last_seen": n.get("last_seen", 0),
             "uptime": (s or {}).get("uptime") or 0,
             "agent_ver": n.get("agent_ver", ""),
-            "expires_at": n.get("expires_at", ""),
+            "expires_at": exp.get("date") or n.get("expires_at", ""),
+            "expires": exp,                          # auto/mode/days_left，前端据此标黄标红、写"每月自动续"
             "quota_bytes": n.get("quota_bytes", 0),
-            "used_bytes": rx + tx,
+            "cycle": cycle,                          # 空字典 = 不按周期，used 就是累计
+            "used_bytes": cycle.get("used") if cycle else (rx + tx),
             "rx_total": rx, "tx_total": tx,
             "spark": store.spark(n["id"], 24),
             "three": three,                        # 1 小时 / 20 格（每格 3 分钟），Komari 主题口径
@@ -1225,6 +1449,23 @@ class Handler(BaseHTTPRequestHandler):
     def _bearer(self):
         h = self.headers.get("Authorization") or ""
         return h[7:].strip() if h.lower().startswith("bearer ") else ""
+
+    @staticmethod
+    def _check_period_fields(data):
+        """配额周期 / 到期续期字段的校验与归一（day|month|year，日期 YYYY-MM-DD）"""
+        for k in ("quota_mode", "renew_mode"):
+            if k in data:
+                v = str(data.get(k) or "").strip().lower()
+                if v and v not in PERIOD_UNITS:
+                    return "周期只能选 day / month / year（或留空表示不按周期）"
+                data[k] = v
+        for k in ("quota_start", "renew_start"):
+            if k in data:
+                v = str(data.get(k) or "").strip()[:10]
+                if v and not parse_date(v):
+                    return "起始日期格式应为 YYYY-MM-DD"
+                data[k] = "" if not v or v == "0000-00-00" else v
+        return ""
 
     def _admin_ok(self):
         """两种凭证都收：Authorization: Bearer <admin_token>，或登录后的会话 Cookie（后台页面用后者）"""
@@ -1324,8 +1565,12 @@ class Handler(BaseHTTPRequestHandler):
                 n["can_self_upgrade"] = _ver_tuple(n.get("agent_ver")) >= UPGRADE_MIN_VER
                 seen = int(n.get("last_seen") or 0)
                 n["online"] = bool(seen) and (now - seen < OFFLINE_AFTER)
-                rx, tx = self.store.totals(n["id"])
-                n["used_bytes"] = rx + tx
+                rx, tx = self.store.lifetime(n["id"])
+                n["rx_total"], n["tx_total"] = rx, tx
+                n["cycle"] = self.store.cycle_info(n)
+                n["expires"] = expires_info(n)
+                n["used_bytes"] = n["cycle"].get("used") if n["cycle"] else rx + tx
+                n["expires_at"] = n["expires"].get("date") or n.get("expires_at", "")
                 nodes.append(n)
             return self._send(200, {"nodes": nodes})
         if path == "/install-agent.sh":
@@ -1591,6 +1836,28 @@ class Handler(BaseHTTPRequestHandler):
                 n = self.store.reorder(ids)
                 self.store.audit("node_order", "", f"重排 {n} 台", self._peer_ip())
                 return self._send(200, {"ok": True, "count": n})
+            if rest == "renew-batch":                  # 批量设到期续期（选中的节点一次搞定）
+                payload = self._json_body() or {}
+                ids = payload.get("ids")
+                all_nodes = bool(payload.get("all"))
+                data = {k: v for k, v in payload.items() if k not in ("ids", "all")}
+                err = self._check_period_fields(data)
+                if err:
+                    return self._send(400, {"error": err})
+                mode = (data.get("renew_mode") or "").strip()
+                start = (data.get("renew_start") or "").strip()
+                changed = 0
+                for n in self.store.nodes():
+                    if not all_nodes and ids and n["id"] not in set(ids):
+                        continue
+                    # 起点留空 = 用这台机器现在的到期日（没有就用今天），不用一台台填
+                    base = start or (n.get("renew_start") or n.get("expires_at") or "").strip() \
+                        or local_date().isoformat()
+                    self.store.update_node(n["id"], renew_mode=mode, renew_start=base)
+                    changed += 1
+                self.store.audit("node_renew_batch", f"{changed} 台",
+                                 f"{mode or '不自动'} 起点 {start or '各自当前到期日'}", self._peer_ip())
+                return self._send(200, {"ok": True, "count": changed})
             if rest == "country-refresh-all":          # 所有还没有地区的节点立即重新识别
                 updated, failed = [], []
                 for n in self.store.nodes():
@@ -1656,6 +1923,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"id": nid, "token": tok})
             nid = rest
             data = self._json_body() or {}
+            err = self._check_period_fields(data)
+            if err:
+                return self._send(400, {"error": err})
+            if data.get("renew_mode") and not data.get("renew_start") and "renew_start" in data:
+                data["renew_start"] = local_date().isoformat()   # 开了续期没给起点：从今天开始滚
             if "country" in data:
                 raw = str(data.get("country") or "").strip().upper()
                 if raw and not re.fullmatch(r"[A-Z]{2}", raw):
@@ -1669,7 +1941,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "节点不存在或无有效字段"})
             node = self.store.node(nid) or {}
             changed = ",".join(k for k in data if k in
-                               {"alias", "groups", "tags", "quota_bytes", "expires_at", "note", "enabled", "country"})
+                               {"alias", "groups", "tags", "quota_bytes", "expires_at", "note",
+                                "enabled", "country", "quota_mode", "quota_start",
+                                "renew_mode", "renew_start"})
             self.store.audit("node_update", node.get("alias") or nid, changed, self._peer_ip())
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "not found"})
@@ -1807,7 +2081,11 @@ def cmd_addnode(args):
     cfg = load_config()
     store = Store(cfg["db"])
     nid, tok = store.add_node(args.alias, args.group, _quota(args.quota),
-                              args.expires or "", args.note or "")
+                              args.expires or "", args.note or "",
+                              quota_mode=args.quota_mode or None,
+                              quota_start=args.quota_start or "",
+                              renew_mode=args.renew or None,
+                              renew_start=args.renew_start or "")
     base = (args.server or cfg.get("base_url") or "https://status.example.com").rstrip("/")
     print(f"节点已创建\n  id    : {nid}\n  alias : {args.alias}")
     print(f"\n该节点的安装命令（token 只显示这一次，请立即保存）：\n"
@@ -1917,6 +2195,12 @@ def main(argv=None):
     p.add_argument("--group", default="")
     p.add_argument("--quota", default="", help="如 500G / 1T，留空表示不限量")
     p.add_argument("--expires", default="", help="到期日 YYYY-MM-DD")
+    p.add_argument("--quota-mode", default="", choices=["", "day", "month", "year"],
+                   help="配额周期：day/month/year（默认 month）")
+    p.add_argument("--quota-start", default="", help="周期起始日 YYYY-MM-DD（默认今天）")
+    p.add_argument("--renew", default="", choices=["", "day", "month", "year"],
+                   help="到期自动滚动：day/month/year（默认 month，不自动传空字符串写不了就用编辑后台改）")
+    p.add_argument("--renew-start", default="", help="续期起点 YYYY-MM-DD（默认 = 到期日 / 今天）")
     p.add_argument("--note", default="")
     p.add_argument("--server", default="", help="对外地址（默认取配置 base_url）")
 

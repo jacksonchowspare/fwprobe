@@ -103,6 +103,10 @@
   .io .num.ok{color:var(--ok)} .io .num.bad{color:var(--warn)}
   .io .real{font-size:10.5px;color:var(--muted);margin-left:auto}
   .spark{width:100%;height:16px;display:block;margin-top:3px;opacity:.9}
+  .cyc{font-style:normal;font-size:10.5px;color:var(--muted);border:1px solid var(--border);
+    border-radius:6px;padding:0 5px;margin-left:4px;vertical-align:1px}
+  .cycnote{font-size:11.5px;color:var(--muted);margin-top:3px}
+  .autorenew{font-style:normal;font-size:10.5px;color:#34d399;margin-left:4px}
   .kvline{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-top:11px}
   .kvline b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
   .lat{margin-top:11px;border-top:1px dashed var(--border);padding-top:9px}
@@ -471,6 +475,11 @@ function card(n) {
   const cpuPct = s.cpu || 0;
   const quota = n.quota_bytes || 0, used = n.used_bytes || 0;
   const quotaPct = quota ? Math.min(100, 100 * used / quota) : 0;
+  const cinfo = n.cycle || {};
+  const cyc = {
+    label: cinfo.unit ? cinfo.unit : "",
+    note: cinfo.reset_date ? `本周期 ${String(cinfo.start_date || "").slice(5)} → ${String(cinfo.reset_date || "").slice(5)} · 剩 ${cinfo.days_left} 天重置` : ""
+  };
   const fam = (n.checks || []).some(c => String(c.family) === "6") ? "v6" : "v4";
   const three = n.three || {targets: {}};
   const carriers = (n.checks || []).map(c => {
@@ -536,8 +545,9 @@ function card(n) {
     </div>
     <div class="kvline"><span>出站 <b>${fmtBytes(n.tx_total)}</b></span><span>入站 <b>${fmtBytes(n.rx_total)}</b></span></div>
     <div class="cell" style="margin-top:10px">
-      <div class="k"><span>流量</span><span class="u">${fmtBytes(used)} / ${quota ? fmtBytes(quota) : "不限量"}</span></div>
+      <div class="k"><span>流量${cyc.label ? ` <i class="cyc">${cyc.label}</i>` : ""}</span><span class="u">${fmtBytes(used)} / ${quota ? fmtBytes(quota) : "不限量"}</span></div>
       ${quota ? bar(quotaPct, quotaPct > 90 ? "bad" : (quotaPct > 75 ? "warn" : "")) : ""}
+      ${cyc.note ? `<div class="cycnote">${cyc.note}</div>` : ""}
     </div>
     <div class="kvline"><span>TCP 连接 <b>${s.tcp == null ? "-" : s.tcp}</b></span>
       <span>UDP 连接 <b>${s.udp == null ? "-" : s.udp}</b></span></div>
@@ -550,7 +560,8 @@ function card(n) {
     </div>
     <div class="foot">
       <span>在线 <b>${n.online ? fmtDur(s.uptime) : "-"}</b></span>
-      <span>到期 <b>${n.expires_at || "—"}</b></span>
+      <span>到期 <b>${n.expires_at || "—"}</b>${(n.expires && n.expires.auto)
+        ? `<i class="autorenew">${({day: "每天", month: "每月", year: "每年"})[n.expires.mode] || ""}自动续</i>` : ""}</span>
     </div>
   </div>`;
 }
@@ -690,7 +701,8 @@ function openQuick(id) {
     ["上行", fmtSpeed(s.tx_bps)], ["下行", fmtSpeed(s.rx_bps)],
     ["TCP", s.tcp == null ? "—" : s.tcp], ["UDP", s.udp == null ? "—" : s.udp],
     ["出站累计", fmtBytes(n.tx_total)], ["入站累计", fmtBytes(n.rx_total)],
-    ["配额", n.quota_bytes ? fmtBytes(n.quota_bytes) : "不限"], ["到期", n.expires_at || "—"],
+    ["配额", n.quota_bytes ? fmtBytes(n.quota_bytes) + (n.cycle && n.cycle.unit ? " / " + n.cycle.unit : "") : "不限"],
+    ["到期", (n.expires_at || "—") + ((n.expires && n.expires.auto) ? "（自动续）" : "")],
     ["运行时长", fmtDur(s.uptime)], ["Agent", n.agent_ver || "—"]
   ];
   const th = n.three || {targets: {}};
@@ -1075,9 +1087,12 @@ async function loadDetail() {
       ["运行时长", fmtDur(s.uptime)], ["进程数", s.procs == null ? "—" : s.procs],
       ["负载 1/5/15", [s.load1, s.load5, s.load15].map(v => v == null ? "-" : Number(v).toFixed(2)).join(" / ")],
       ["网卡", s.iface || "—"], ["Agent 版本", CUR.agent_ver || "—"],
-      ["最近上报", ago(CUR.last_seen)], ["到期", CUR.expires_at || "—"],
+      ["最近上报", ago(CUR.last_seen)],
+      ["到期", (CUR.expires_at || "—") + ((CUR.expires && CUR.expires.auto) ? "（自动续）" : "")],
       ["流量配额", CUR.quota_bytes ? fmtBytes(CUR.quota_bytes) : "不限量"],
-      ["已用流量", fmtBytes(CUR.used_bytes)], ["节点 ID", CUR.id]
+      ["本周期用量", fmtBytes(CUR.used_bytes) + (CUR.cycle && CUR.cycle.reset_date
+        ? `（${CUR.cycle.start_date} → ${CUR.cycle.reset_date} 重置）` : "")],
+      ["节点 ID", CUR.id]
     ].map(r => `<div class="kv"><span>${r[0]}</span><b>${r[1]}</b></div>`).join("");
   } catch (e) {
     $("d_sys").innerHTML = `<div>加载失败<b>${e.message}</b></div>`;

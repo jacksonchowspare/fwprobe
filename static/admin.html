@@ -70,6 +70,8 @@
     background:rgba(20,26,36,.94);color:#e8eef8;border:1px solid var(--border);border-radius:10px;
     padding:8px 14px;font-size:12.5px;opacity:0;pointer-events:none;transition:.2s;z-index:40}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .row2{display:flex;gap:6px}
+  .row2 select{width:104px;flex:0 0 auto}
   /* 三网目标 */
   .tghead,.tgrow{display:grid;grid-template-columns:32px 92px 82px minmax(170px,1.8fr) 58px 74px 60px 26px 24px;
     gap:6px;align-items:start}
@@ -178,6 +180,7 @@
         <button onclick="load()">刷新</button>
         <button onclick="openGroups()">分组管理</button>
         <button onclick="openTargets()">三网目标</button>
+        <button onclick="openRenew()">到期续期</button>
         <button onclick="openAudit()">操作日志</button>
         <button onclick="resetOrder()" title="按创建时间重新排（改乱了可以一键复位）">恢复默认顺序</button>
         <button class="primary" id="up_all" onclick="upgradeAll()" hidden></button>
@@ -235,8 +238,26 @@
     </div>
     <div class="f2">
       <div class="f"><label>配额（GB，留空=不限）</label><input id="ed_quota" type="number" min="0" step="1" placeholder="不限"></div>
-      <div class="f"><label>到期日</label><input id="ed_expires" type="date"></div>
+      <div class="f"><label>配额周期</label>
+        <div class="row2">
+          <select id="ed_quota_mode" onchange="edPreview()">
+            <option value="">不按周期</option>
+            <option value="day">按日</option><option value="month">按月</option><option value="year">按年</option>
+          </select>
+          <input id="ed_quota_start" type="date" title="周期起始日" onchange="edPreview()">
+        </div>
+      </div>
     </div>
+    <div class="f2">
+      <div class="f"><label>到期日（续期起点）</label><input id="ed_expires" type="date" onchange="edPreview()"></div>
+      <div class="f"><label>到期自动滚动</label>
+        <select id="ed_renew_mode" onchange="edPreview()">
+          <option value="">不自动（就按上面的日期）</option>
+          <option value="day">按日</option><option value="month">按月</option><option value="year">按年</option>
+        </select>
+      </div>
+    </div>
+    <div class="muted small" id="ed_period_preview" style="margin:-2px 0 10px"></div>
     <div class="f"><label>备注（只在后台可见）</label><input id="ed_note" placeholder="可选"></div>
     <div class="dlgfoot">
       <button onclick="closeMask('m_edit')">取消</button>
@@ -281,6 +302,32 @@
       <button class="primary" onclick="saveTargets()">保存并下发</button>
     </div>
     <div class="muted small" id="tg_ver" style="margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- 批量到期续期 -->
+<div class="mask" id="m_renew">
+  <div class="dlg" style="max-width:560px">
+    <h2>到期续期</h2>
+    <div class="muted small" style="margin-bottom:10px">
+      设一次「自动往后滚」，以后就不用每月手改了：到期日会自己跳到下一个周期。
+      起始日留空 = 每台用自己现在的到期日；没有到期日的用今天。
+    </div>
+    <div class="f2">
+      <div class="f"><label>滚动周期</label>
+        <select id="rn_mode">
+          <option value="">不自动（就按现在的日期）</option>
+          <option value="day">按日</option><option value="month" selected>按月</option>
+          <option value="year">按年</option>
+        </select>
+      </div>
+      <div class="f"><label>起始到期日（留空=各自当前）</label><input id="rn_start" type="date"></div>
+    </div>
+    <div class="f"><label>应用范围（默认全选）</label><div id="rn_list"></div></div>
+    <div class="dlgfoot">
+      <button onclick="closeMask('m_renew')">取消</button>
+      <button class="primary" onclick="saveRenew()">应用</button>
+    </div>
   </div>
 </div>
 
@@ -517,8 +564,16 @@ function renderRows() {
     const gl = n.groups_list || [];
     const tags = (n.tags || []).map(t =>
       `<span class="tag" style="color:${safeColor(t.c)};border-color:${safeColor(t.c)}55;background:${safeColor(t.c)}1f">${esc(t.t)}</span>`).join("");
-    const quota = n.quota_bytes ? `${fmtBytes(n.used_bytes || 0)} / ${fmtBytes(n.quota_bytes)}` : "不限";
-    const exp = n.expires_at || "—";
+    const cyc = n.cycle || {}, ex = n.expires || {};
+    const quota = n.quota_bytes
+      ? `${fmtBytes(n.used_bytes || 0)} / ${fmtBytes(n.quota_bytes)}` +
+        (cyc.days_left != null ? ` · 剩 ${cyc.days_left} 天` : "")
+      : (cyc.used ? `${fmtBytes(cyc.used)}（不限量）` : "不限");
+    const exp = ex.date || n.expires_at || "—";
+    const expNote = ex.auto
+      ? `${UNIT_CN[ex.mode]}自动 · 剩 ${ex.days_left} 天`
+      : (ex.days_left == null ? ""
+         : ex.days_left >= 0 ? `剩 ${ex.days_left} 天` : `已过期 ${-ex.days_left} 天`);
     return `<tr data-id="${n.id}" draggable="true">
       <td data-k="顺序" class="ord"><span class="grip" title="按住拖动，调整展示页卡片顺序">⠿</span></td>
       <td data-k="节点"><b>${esc(n.alias || n.id)}</b>
@@ -532,7 +587,9 @@ function renderRows() {
         ${n.pending_uninstall ? `<div class="tag" style="color:var(--bad);border-color:#f8717155;background:#f871711f;margin-top:2px">待卸载（等上报）</div>` : ""}
         ${n.target_ver ? `<div class="tag" title="已排队：节点下次上报（≤30 秒）就会下载新版本、校验后重启自己" style="color:var(--warn);border-color:#fbbf2455;background:#fbbf241f;margin-top:2px">升级中 → ${esc(n.target_ver)}</div>`
           : needUp ? `<div class="muted" style="font-size:11.5px">可升到 ${esc(META.agent_version)}</div>` : ""}</td>
-      <td data-k="到期/配额" class="small">${esc(exp)}<div class="muted">${quota}</div></td>
+      <td data-k="到期/配额" class="small">${esc(exp)}
+        <div class="muted">${quota}</div>
+        ${expNote ? `<div class="muted" style="font-size:11px">${esc(expNote)}</div>` : ""}</td>
       <td data-k="操作"><div class="ops">
         <button onclick="openEdit('${n.id}')">编辑</button>
         ${needUp && n.can_self_upgrade ? `<button class="primary" onclick="upgrade('${n.id}')">升级</button>` : ""}
@@ -611,6 +668,93 @@ async function resetOrder() {
   NODES.sort((a, b) => (a.created || 0) - (b.created || 0));
   renderRows();
   await saveOrder();
+}
+
+/* ── 周期 / 到期 的日期计算（与服务端 probe.py 保持同一口径）── */
+const PERIOD_UNITS = ["day", "month", "year"];
+const UNIT_CN = {day: "按日", month: "按月", year: "按年"};
+const TODAY0 = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+function fmtDay(d) {
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function parseDay(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || "").trim());
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+}
+function addPeriod(d, unit, n) {
+  n = n || 1;
+  if (unit === "day") return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  const y = d.getFullYear() + (unit === "year" ? n : 0);
+  const m = d.getMonth() + (unit === "month" ? n : 0);
+  const last = new Date(y, m + 1, 0).getDate();     // 2 月 / 30 天月份自动回退
+  return new Date(y, m, Math.min(d.getDate(), last));
+}
+function daysTo(d) { return Math.round((d - TODAY0()) / 86400000); }
+function cycleBounds(mode, start) {
+  if (!PERIOD_UNITS.includes(mode)) return null;
+  const today = TODAY0();
+  let cur = parseDay(start) || today;
+  if (cur > today) return {start: cur, end: addPeriod(cur, mode)};
+  for (let i = 0; i < 4000; i++) {
+    const nxt = addPeriod(cur, mode);
+    if (nxt > today) break;
+    cur = nxt;
+  }
+  return {start: cur, end: addPeriod(cur, mode)};
+}
+function rollForward(base, unit) {
+  let d = parseDay(base);
+  if (!d || !PERIOD_UNITS.includes(unit)) return d;
+  for (let i = 0; i < 4000 && d <= TODAY0(); i++) d = addPeriod(d, unit);
+  return d;
+}
+function edPreview() {
+  const el = $("ed_period_preview");
+  if (!el) return;
+  const qm = $("ed_quota_mode").value, qs = $("ed_quota_start").value;
+  const rm = $("ed_renew_mode").value, rs = $("ed_expires").value;
+  const gb = Number($("ed_quota").value || 0);
+  const bits = [];
+  if (qm) {
+    const cb = cycleBounds(qm, qs || fmtDay(new Date()));
+    bits.push(`配额${UNIT_CN[qm]}：${fmtDay(cb.start)} → ${fmtDay(cb.end)} 00:00 重置` +
+              `（还有 ${Math.max(0, daysTo(cb.end))} 天）`);
+  } else {
+    bits.push("配额不按周期切分，显示累计用量");
+  }
+  if (rm && rs) {
+    const d = rollForward(rs, rm);
+    bits.push(`到期 ${fmtDay(d)}（${UNIT_CN[rm]}自动滚动 · 剩 ${Math.max(0, daysTo(d))} 天）`);
+  } else if (rs) {
+    const d = parseDay(rs), left = daysTo(d);
+    bits.push(`到期 ${fmtDay(d)}（不自动 · ${left >= 0 ? "剩 " + left + " 天" : "已过期 " + (-left) + " 天"}）`);
+  }
+  if (gb > 0) bits.push(`额度 ${gb} GB / ${qm ? UNIT_CN[qm] : "累计"}`);
+  el.textContent = bits.join("　·　");
+}
+function openRenew() {
+  $("rn_list").innerHTML = NODES.map(n => {
+    const ex = n.expires || {};
+    const when = ex.date || n.expires_at || "未填";
+    const tail = n.renew_mode ? ` · ${UNIT_CN[n.renew_mode]}滚动` : "";
+    return `<label class="ck" style="padding:5px 0;border-bottom:1px dashed var(--border)">
+      <input type="checkbox" class="rn-on" value="${esc(n.id)}" checked>
+      <span class="small">${esc(n.alias || n.id)}</span>
+      <span class="muted small" style="margin-left:auto">${esc(when + tail)}</span></label>`;
+  }).join("");
+  openMask("m_renew");
+}
+async function saveRenew() {
+  const ids = [...document.querySelectorAll(".rn-on:checked")].map(x => x.value);
+  if (!ids.length) { alert("至少选一台"); return; }
+  const r = await API("/api/nodes/renew-batch", {method: "POST",
+    body: JSON.stringify({ids, renew_mode: $("rn_mode").value, renew_start: $("rn_start").value || ""})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "设置失败"); return; }
+  closeMask("m_renew");
+  toast(`已设置 ${d.count} 台`);
+  await load();
 }
 
 /* ── 三网目标 ── */
@@ -732,7 +876,12 @@ function openAdd() {
   $("ed_title").textContent = "新增节点";
   $("ed_alias").value = "";
   $("ed_quota").value = "";
-  $("ed_expires").value = "";
+  const today = fmtDay(new Date());
+  $("ed_quota_mode").value = "month";       // 默认：配额按月统计
+  $("ed_quota_start").value = today;
+  $("ed_renew_mode").value = "month";       // 默认：到期按月自动滚动（开关默认开启）
+  $("ed_expires").value = today;
+  edPreview();
   $("ed_note").value = "";
   $("ed_newgroup").value = "";
   setCountryUI("");
@@ -753,7 +902,11 @@ function openEdit(id) {
   $("ed_title").textContent = "编辑节点 · " + (n.alias || n.id);
   $("ed_alias").value = n.alias || "";
   $("ed_quota").value = n.quota_bytes ? Math.round(n.quota_bytes / 1024 / 1024 / 1024) || "" : "";
-  $("ed_expires").value = n.expires_at || "";
+  $("ed_quota_mode").value = n.quota_mode || "";
+  $("ed_quota_start").value = n.quota_start || "";
+  $("ed_expires").value = n.renew_start || n.expires_at || "";
+  $("ed_renew_mode").value = n.renew_mode || "";
+  edPreview();
   $("ed_note").value = n.note || "";
   setCountryUI(n.country || "");
   $("ed_country_pop").hidden = true;
@@ -827,6 +980,10 @@ async function saveNode() {
     groups: [...SEL_GROUPS],
     tags: TAGS,
     quota_bytes: quotaGb > 0 ? Math.round(quotaGb * 1024 * 1024 * 1024) : 0,
+    quota_mode: $("ed_quota_mode").value,
+    quota_start: $("ed_quota_start").value || "",
+    renew_mode: $("ed_renew_mode").value,
+    renew_start: $("ed_expires").value || "",
     expires_at: $("ed_expires").value || "",
     note: $("ed_note").value.trim(),
     country: cc

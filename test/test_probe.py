@@ -4,6 +4,7 @@
 覆盖：节点 CRUD / token 轮换 / 上报入库 / 公开摘要不泄露隐私 / HTTP 路由与鉴权 /
 agent 的 /proc 解析 / TCPing 真实握手 / 配额解析。
 """
+import datetime
 import json
 import pathlib
 import os
@@ -493,6 +494,118 @@ class TestAgentTargets(unittest.TestCase):
         self.assertEqual(p.get("targets_ver"), P.targets_signature(cfg["targets"]))
 
 
+class TestBillingPeriod(unittest.TestCase):
+    """配额周期（日/月/年 + 起始日）与到期自动滚动（v0.5.24）"""
+
+    def _ts(self, *args):
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        return int(datetime.datetime(*args, tzinfo=tz).timestamp())
+
+    def test_add_months_clamps_to_month_end(self):
+        self.assertEqual(P.add_months(datetime.date(2026, 1, 31), 1), datetime.date(2026, 2, 28))
+        self.assertEqual(P.add_months(datetime.date(2026, 3, 31), 1), datetime.date(2026, 4, 30))
+        self.assertEqual(P.add_months(datetime.date(2026, 11, 11), 1), datetime.date(2026, 12, 11))
+        self.assertEqual(P.add_months(datetime.date(2026, 12, 11), 2), datetime.date(2027, 2, 11))
+
+    def test_add_period_units(self):
+        self.assertEqual(P.add_period(datetime.date(2024, 2, 29), "year"), datetime.date(2025, 2, 28))
+        self.assertEqual(P.add_period(datetime.date(2026, 11, 11), "day"), datetime.date(2026, 11, 12))
+        self.assertEqual(P.add_period(datetime.date(2026, 11, 11), "year"), datetime.date(2027, 11, 11))
+
+    def test_cycle_bounds_month(self):
+        """11-11 起按月：11-11 00:00 ~ 12-11 00:00；12-11 当天就进入下一段"""
+        st, en = P.cycle_bounds("month", "2026-11-11", self._ts(2026, 11, 20, 12))
+        self.assertEqual(P.local_date(st).isoformat(), "2026-11-11")
+        self.assertEqual(P.local_date(en).isoformat(), "2026-12-11")
+        st2, en2 = P.cycle_bounds("month", "2026-11-11", self._ts(2026, 12, 11, 0, 30))
+        self.assertEqual(P.local_date(st2).isoformat(), "2026-12-11")
+        self.assertEqual(P.local_date(en2).isoformat(), "2027-01-11")
+
+    def test_cycle_bounds_day_year_and_off(self):
+        now = self._ts(2026, 11, 20, 9)
+        st, en = P.cycle_bounds("day", "2026-11-11", now)
+        self.assertEqual(P.local_date(st).isoformat(), "2026-11-20")
+        self.assertEqual(P.local_date(en).isoformat(), "2026-11-21")
+        st, en = P.cycle_bounds("year", "2026-11-11", now)
+        self.assertEqual(P.local_date(st).isoformat(), "2026-11-11")
+        self.assertEqual(P.local_date(en).isoformat(), "2027-11-11")
+        self.assertEqual(P.cycle_bounds("", "2026-11-11", now), (0, 0))
+
+    def test_cycle_start_in_future(self):
+        """起始日填了未来日期：第一个周期从那天才开始，不会把今天算进上一段"""
+        st, en = P.cycle_bounds("month", "2027-01-11", self._ts(2026, 11, 20, 9))
+        self.assertEqual(P.local_date(st).isoformat(), "2027-01-11")
+        self.assertEqual(P.local_date(en).isoformat(), "2027-02-11")
+
+    def test_roll_forward(self):
+        today = datetime.date(2026, 11, 11)
+        # 到期日当天算已续到下一期（不显示"今天到期"）
+        self.assertEqual(P.roll_forward("2026-11-11", "month", today, after_today=True),
+                         datetime.date(2026, 12, 11))
+        self.assertEqual(P.roll_forward("2026-12-11", "month", today), datetime.date(2026, 12, 11))
+        self.assertEqual(P.roll_forward("2020-01-05", "year", today), datetime.date(2027, 1, 5))
+        self.assertEqual(P.roll_forward("2026-11-11", "day", today, after_today=True),
+                         datetime.date(2026, 11, 12))
+        self.assertEqual(P.roll_forward("2026-11-11", "", today), datetime.date(2026, 11, 11))
+
+    def test_expires_info(self):
+        today = P.local_date()
+        e = P.expires_info({"renew_mode": "month", "renew_start": today.isoformat()})
+        self.assertTrue(e["auto"])
+        self.assertEqual(e["date"], P.add_months(today, 1).isoformat())
+        self.assertEqual(e["days_left"], (P.add_months(today, 1) - today).days)
+        e2 = P.expires_info({"renew_mode": "", "expires_at": today.isoformat()})
+        self.assertFalse(e2["auto"])
+        self.assertEqual(e2["days_left"], 0)
+        self.assertEqual(P.expires_info({}), {"auto": False, "mode": "", "base": "",
+                                              "date": "", "days_left": None})
+
+
+class TestTrafficAccounting(unittest.TestCase):
+    def setUp(self):
+        self.st, self.dir = mk_store()
+        self.nid, self.tok = self.st.add_node("算流量")
+
+    def _report(self, rx, tx):
+        self.st.ingest(self.st.node(self.nid),
+                       {"ts": int(time.time()), "net": {"rx_total": rx, "tx_total": tx}}, "1.2.3.4")
+
+    def test_accumulates_deltas(self):
+        self._report(1000, 2000)               # 首报：只记基线
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (0, 0))
+        self._report(5000, 9000)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (4000, 7000))
+        self.assertEqual(self.st.cycle_info(n)["used"], 11000)
+
+    def test_counter_reset_after_reboot(self):
+        self._report(1000, 1000)
+        self._report(9000, 9000)
+        self._report(300, 200)                 # 重启后计数器归零
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (8300, 8200))
+
+    def test_cycle_rollover_archives(self):
+        self._report(0, 0)
+        self.st.conn.execute("UPDATE nodes SET cyc_start=?,cyc_rx=?,cyc_tx=? WHERE id=?",
+                             (int(time.time()) - 40 * 86400, 777, 888, self.nid))
+        self.st.conn.commit()
+        self._report(100, 100)
+        hist = self.st.conn.execute("SELECT * FROM traffic_hist WHERE node_id=?", (self.nid,)).fetchall()
+        self.assertEqual(len(hist), 1)
+        self.assertEqual((hist[0]["rx"], hist[0]["tx"]), (777, 888))
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (100, 100))   # 新周期从 0 起
+        self.assertEqual(self.st.lifetime(self.nid), (877, 988))   # 归档 + 本期
+
+    def test_defaults_switch_on(self):
+        n = self.st.node(self.nid)
+        self.assertEqual(n["quota_mode"], "month")     # 配额默认按月
+        self.assertEqual(n["renew_mode"], "month")     # 到期默认按月自动滚动
+        self.assertTrue(n["quota_start"] and n["renew_start"])
+
+
 class TestOrdering(unittest.TestCase):
     """展示页卡片顺序（v0.5.19）：后台拖动 → nodes.sort_order → 公开页按序渲染"""
 
@@ -633,6 +746,50 @@ class TestHTTP(unittest.TestCase):
         d = json.loads(body)
         self.assertIn("agent_version", d)
         self.assertIn("version", d)
+
+    def test_period_fields_validated(self):
+        code, body = self._post("/api/nodes/" + self.nid, {"quota_mode": "week"}, token="admin-test")
+        self.assertEqual(code, 400, body)
+        code, body = self._post("/api/nodes/" + self.nid,
+                                {"quota_mode": "month", "quota_start": "not-a-date"},
+                                token="admin-test")
+        self.assertEqual(code, 400, body)
+        code, body = self._post("/api/nodes/" + self.nid,
+                                {"quota_mode": "year", "quota_start": "2026-11-11",
+                                 "renew_mode": "month", "renew_start": "2026-11-11"},
+                                token="admin-test")
+        self.assertEqual(code, 200, body)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["quota_mode"], n["quota_start"]), ("year", "2026-11-11"))
+        self.assertEqual((n["renew_mode"], n["renew_start"]), ("month", "2026-11-11"))
+
+    def test_renew_batch_uses_each_nodes_date(self):
+        nid2, _ = self.st.add_node("节点乙", expires_at="2027-03-08", renew_mode="")
+        self.st.update_node(nid2, renew_start="", expires_at="2027-03-08")
+        code, body = self._post("/api/nodes/renew-batch",
+                                {"ids": [nid2], "renew_mode": "year", "renew_start": ""},
+                                token="admin-test")
+        self.assertEqual(code, 200, body)
+        self.assertEqual(json.loads(body)["count"], 1)
+        n2 = self.st.node(nid2)
+        self.assertEqual(n2["renew_mode"], "year")
+        self.assertEqual(n2["renew_start"], "2027-03-08")     # 留空 = 各自当前到期日
+
+    def test_summary_carries_cycle_and_rolled_expiry(self):
+        self.st.update_node(self.nid, quota_bytes=100 * 1024 ** 3, quota_mode="month",
+                            quota_start=P.local_date().isoformat(),
+                            renew_mode="month", renew_start=P.local_date().isoformat())
+        self.st.ingest(self.st.node(self.nid),
+                       {"ts": int(time.time()), "net": {"rx_total": 0, "tx_total": 0}}, "1.2.3.4")
+        self.st.ingest(self.st.node(self.nid),
+                       {"ts": int(time.time()), "net": {"rx_total": 5 * 1024 ** 3,
+                                                         "tx_total": 3 * 1024 ** 3}}, "1.2.3.4")
+        d = P.public_summary(self.st)
+        n = [x for x in d["nodes"] if x["id"] == self.nid][0]
+        self.assertEqual(n["used_bytes"], 8 * 1024 ** 3)
+        self.assertEqual(n["cycle"]["reset_date"], P.add_months(P.local_date(), 1).isoformat())
+        self.assertTrue(n["expires"]["auto"])
+        self.assertEqual(n["expires_at"], n["expires"]["date"])
 
     def test_report_pushes_targets(self):
         """0.5.11+ 的 agent 上报带 targets_ver：版本不一致就下发；一致/老 agent 不下发"""
