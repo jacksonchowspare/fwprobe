@@ -171,6 +171,56 @@ ok "配置权限 600"
 
 step "5. 注册 systemd 服务"
 if [ "$USER_MODE" = 1 ]; then
+  # 先写 sudoers 并实测（Ubuntu 25.10+ 默认换成 sudo-rs，visudo 有的版本不认 -c -f，
+  # 所以校验失败要分辨"语法错"和"这版 visudo 不支持该参数"，不能一刀切退出）
+  cat > "$SUDOERS" <<EOF
+# iProbe agent 低权限模式：仅放行这两条，别往里加别的
+$AGENT_USER ALL=(root) NOPASSWD: /bin/systemctl restart $SERVICE
+$AGENT_USER ALL=(root) NOPASSWD: $HELPER
+EOF
+  chmod 440 "$SUDOERS"
+  chown root:root "$SUDOERS"
+  if command -v visudo >/dev/null 2>&1; then
+    if out="$(visudo -cf "$SUDOERS" 2>&1)"; then
+      ok "sudoers 语法校验通过"
+    elif printf '%s' "$out" | grep -qiE 'usage|unexpected|unknown option|invalid option|not supported|extra operand'; then
+      warn "这版 visudo 不支持 -c -f（多半是 sudo-rs），跳过语法校验，直接用 sudo -l 实测"
+    else
+      warn "visudo 报错：$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+    fi
+  fi
+  # 真正的验收：先问"能不能执行这条"；有的 sudo-rs 不让 -l 带命令参数，就直接试跑一次
+  SUDO_OK=0
+  if sudo -u "$AGENT_USER" sudo -n -l /bin/systemctl restart "$SERVICE" >/dev/null 2>&1; then
+    SUDO_OK=1
+  elif sudo -u "$AGENT_USER" sudo -n /bin/systemctl restart "$SERVICE" >/dev/null 2>&1; then
+    SUDO_OK=1
+  fi
+  if [ "$SUDO_OK" = 1 ]; then
+    ok "已确认 $AGENT_USER 可以用 sudo 重启服务（自升级不会卡住）"
+  else
+    warn "$AGENT_USER 的 sudo 授权没生效 → 本次按 root 模式安装（不影响上报，只是没降权）"
+    warn "排查：sudo --version | head -1；cat $SUDOERS"
+    rm -f "$SUDOERS"
+    USER_MODE=0
+  fi
+fi
+
+if [ "$USER_MODE" = 1 ]; then
+  cat > "$HELPER" <<EOF
+#!/bin/sh
+# iProbe agent 自卸载（agent 通过 sudo 调用）：root 持有，agent 用户不可改
+systemctl stop $SERVICE 2>/dev/null || true
+systemctl disable $SERVICE 2>/dev/null || true
+rm -f /etc/systemd/system/$SERVICE.service
+systemctl daemon-reload 2>/dev/null || true
+rm -rf $AGENT_DIR $AGENT_ETC $AGENT_STATE
+rm -f $SUDOERS
+userdel $AGENT_USER 2>/dev/null || true
+EOF
+  chmod 755 "$HELPER"
+  chown root:root "$HELPER"
+  ok "已装自卸载脚本（$HELPER，root 持有）"
   cat > "$UNIT" <<EOF
 [Unit]
 Description=iProbe agent (VPS probe collector)
@@ -197,31 +247,6 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-  # sudoers：只放两条，够自升级重启和自卸载用；helper 由 root 持有，agent 用户改不了它
-  cat > "$SUDOERS" <<EOF
-# iProbe agent 低权限模式：仅放行这两条，别往里加别的
-$AGENT_USER ALL=(root) NOPASSWD: /bin/systemctl restart $SERVICE
-$AGENT_USER ALL=(root) NOPASSWD: $HELPER
-Defaults:$AGENT_USER !requiretty
-EOF
-  chmod 440 "$SUDOERS"
-  if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$SUDOERS" >/dev/null 2>&1; then
-    rm -f "$SUDOERS"; die "sudoers 语法校验失败，已删除该文件"
-  fi
-  cat > "$HELPER" <<EOF
-#!/bin/sh
-# iProbe agent 自卸载（agent 通过 sudo 调用）：root 持有，agent 用户不可改
-systemctl stop $SERVICE 2>/dev/null || true
-systemctl disable $SERVICE 2>/dev/null || true
-rm -f /etc/systemd/system/$SERVICE.service
-systemctl daemon-reload 2>/dev/null || true
-rm -rf $AGENT_DIR $AGENT_ETC $AGENT_STATE
-rm -f $SUDOERS
-userdel $AGENT_USER 2>/dev/null || true
-EOF
-  chmod 755 "$HELPER"
-  chown root:root "$HELPER"
-  ok "已装 sudoers 两条授权 + 自卸载脚本（$HELPER）"
 else
   rm -f "$SUDOERS" "$HELPER" 2>/dev/null || true
   cat > "$UNIT" <<EOF
@@ -253,6 +278,17 @@ step "6. 首次上报自检"
 sleep 3
 if systemctl is-active --quiet "$SERVICE"; then
   ok "服务运行中（$SERVICE）"
+  PID="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
+  RUNUSER="$(ps -o user= -p "${PID:-0}" 2>/dev/null | tr -d ' ' || true)"
+  if [ -n "${RUNUSER:-}" ]; then
+    if [ "$USER_MODE" = 1 ] && [ "$RUNUSER" = "$AGENT_USER" ]; then
+      ok "实际运行身份：$RUNUSER（低权限已生效）"
+    elif [ "$USER_MODE" = 1 ]; then
+      warn "实际运行身份是 $RUNUSER，不是 $AGENT_USER —— 看 sudo journalctl -u $SERVICE -n 30"
+    else
+      ok "实际运行身份：$RUNUSER"
+    fi
+  fi
 else
   warn "服务没起来，看日志：journalctl -u $SERVICE -n 30 --no-pager"
 fi
