@@ -100,18 +100,36 @@ step "3. 配置文件"
 python3 - "$ETC_DIR/config.json" "$PORT" "$BIND" "$BASE_URL" <<'PY'
 import json, os, secrets, sys
 path, port, bind, base = sys.argv[1:5]
-cfg = {"port": int(port), "bind": bind, "db": "/var/lib/fwprobe/probe.db",
-       "base_url": base.rstrip("/"), "admin_token": ""}
+old = {}
 try:
     with open(path, encoding="utf-8") as fh:
-        old = json.load(fh)
-    cfg["admin_token"] = old.get("admin_token") or cfg["admin_token"]
-    if not base and old.get("base_url"):
-        cfg["base_url"] = old["base_url"]
+        old = json.load(fh) or {}
 except FileNotFoundError:
     pass
-if not cfg["admin_token"]:
+except Exception as exc:                    # 老配置读坏了也别把密钥弄丢：先留个副本
+    print(f"[warn] 读取旧配置失败（{exc}），将按新配置写入", file=sys.stderr)
+    try:
+        os.replace(path, path + ".broken")
+    except OSError:
+        pass
+# ⚠ 必须基于旧配置合并：早期版本这里新建字典只挑 admin_token/base_url，
+#    升级一次就把后台密码（admin_password）冲掉了（2026-11-11 CC1 实测，用户登录被踢）
+cfg = dict(old)
+cfg["port"] = int(port)
+cfg["bind"] = bind
+cfg["db"] = old.get("db") or "/var/lib/fwprobe/probe.db"
+cfg["base_url"] = base.rstrip("/") if base else (old.get("base_url") or "")
+if not cfg.get("admin_token"):
     cfg["admin_token"] = secrets.token_urlsafe(32)
+if os.path.exists(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            keep = fh.read()
+        with open(path + ".bak", "w", encoding="utf-8") as fh:
+            fh.write(keep)
+        os.chmod(path + ".bak", 0o600)
+    except OSError:
+        pass
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, ensure_ascii=False, indent=2)
 os.chmod(path, 0o600)
