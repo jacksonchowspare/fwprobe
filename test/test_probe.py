@@ -298,6 +298,98 @@ class TestStaticPage(unittest.TestCase):
         self.assertNotIn(".cells{display:flex", self.src)   # 旧的 flex 格子实现已废弃
 
 
+class TestCountryDetect(unittest.TestCase):
+    """归属地识别：多源兜底 + 失败退避重试（旧版一次失败就永久拉黑，节点 country 一直空）"""
+
+    def tearDown(self):
+        P.COUNTRY_CACHE.clear()
+        P.reset_country_schedule()
+
+    def test_schedule_backoff_and_reset(self):
+        P.reset_country_schedule()
+        self.assertTrue(P.schedule_country("n1", now=1000))
+        self.assertFalse(P.schedule_country("n1", now=1001))      # 退避中，不再打接口
+        self.assertTrue(P.schedule_country("n1", now=1030))
+        self.assertFalse(P.schedule_country("n1", now=1031))
+        P.reset_country_schedule("n1")
+        self.assertTrue(P.schedule_country("n1", now=1031))
+
+    def test_detect_country_third_source(self):
+        calls = []
+
+        class _Resp:
+            def __init__(self, body): self.body = body
+            def read(self, n=None): return self.body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake(url, timeout=0):
+            u = url if isinstance(url, str) else getattr(url, "full_url", "")
+            calls.append(u)
+            if "ipinfo.io" in u:
+                raise OSError("blocked")
+            if "ip-api.com" in u:
+                return _Resp(b'{"status":"fail","message":"reserved range"}')
+            return _Resp(b'{"success":true,"country_code":"JP"}')
+
+        orig = P.urllib.request.urlopen
+        P.urllib.request.urlopen = fake
+        try:
+            code, source, err = P.detect_country("8.8.4.4")
+        finally:
+            P.urllib.request.urlopen = orig
+        self.assertEqual((code, source, err), ("JP", "ipwho", ""))
+        self.assertTrue(any("ipwho.is" in c for c in calls))
+
+    def test_detect_country_reports_reason(self):
+        """全挂时要带上每个源的原因，否则线上只能猜（本次故障就是这么被藏住的）"""
+
+        class _Resp:
+            def read(self, n=None): return b'{"status":"fail","message":"quota exceeded"}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        orig = P.urllib.request.urlopen
+        P.urllib.request.urlopen = lambda url, timeout=0: _Resp()
+        try:
+            code, source, err = P.detect_country("8.8.8.8")
+        finally:
+            P.urllib.request.urlopen = orig
+        self.assertEqual(code, "")
+        for name in ("ipinfo", "ip-api"):
+            self.assertIn(name, err)
+
+    def test_norm_country_only_two_letters(self):
+        self.assertEqual(P.norm_country("jp"), "JP")
+        self.assertEqual(P.norm_country("GB"), "UK")
+        self.assertEqual(P.norm_country("日本"), "")
+        self.assertEqual(P.norm_country("J"), "")
+        self.assertEqual(P.norm_country("JPN"), "")
+
+
+class TestAdminPage(unittest.TestCase):
+    """后台静态页自检：地区选择器与地区列必须真的在位（v0.5.18）"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = pathlib.Path(P.__file__).with_name("static").joinpath("admin.html").read_text("utf-8")
+
+    def test_country_picker_present(self):
+        for token in ('id="ed_country_pop"', "function pickCountry", "function renderPick",
+                      "const COUNTRIES", 'id="cc_all"', "function countryCell"):
+            self.assertIn(token, self.src)
+
+    def test_country_column_present(self):
+        self.assertIn("<th>地区</th>", self.src)
+        self.assertIn("countryCell(n)", self.src)
+
+    def test_single_style_block(self):
+        self.assertEqual(self.src.count("</style>"), 1)
+
+    def test_doctype_first(self):
+        self.assertTrue(self.src.lstrip().startswith("<!DOCTYPE html>"))
+
+
 class TestHTTP(unittest.TestCase):
     def setUp(self):
         self.st, self.dir = mk_store()
@@ -308,6 +400,11 @@ class TestHTTP(unittest.TestCase):
         self.th.start()
         self.base = f"http://127.0.0.1:{self.port}"
         self.nid, self.tok = self.st.add_node("节点甲")
+        # 上报会触发归属地识别：测试里不真联网（否则跑测试看网络脸色）
+        _orig_detect = P.detect_country
+        P.detect_country = lambda ip: ("", "", "test-disabled")
+        self.addCleanup(lambda: setattr(P, "detect_country", _orig_detect))
+        self.addCleanup(P.reset_country_schedule)
 
     def tearDown(self):
         self.srv.shutdown()
@@ -580,6 +677,58 @@ class TestHTTP(unittest.TestCase):
         self.assertEqual(again.node(nid)["country"], "UK")
         again.conn.close()
 
+    def test_country_invalid_input_rejected(self):
+        """地区代码只认两位字母：早期 '日本'/'JA'/'J' 都能存进去，前端算不出旗标，看着像改不了"""
+        nid, _ = self.st.add_node("坏输入")
+        for bad in ("日本", "J", "JPN", "1A", "ja-pan"):
+            code, body = self._post(f"/api/nodes/{nid}", {"country": bad}, token="admin-test")
+            self.assertEqual(code, 400, f"{bad} 应该被拒：{body}")
+            self.assertIn("两位字母", json.loads(body)["error"])
+        self.assertEqual(self.st.node(nid)["country"], "")     # 拒绝后库里不能被写脏
+
+    def test_country_manual_marks_source(self):
+        """手动填的地区打 manual 标记，自动识别永不覆盖"""
+        nid, _ = self.st.add_node("东京-ARM")
+        code, body = self._post(f"/api/nodes/{nid}", {"country": "jp"}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        n = self.st.node(nid)
+        self.assertEqual(n["country"], "JP")
+        self.assertEqual(n["country_src"], "manual")
+        # 有地区的节点不会再排自动识别
+        P.reset_country_schedule()
+        self.st._maybe_country(nid, "132.145.122.70")
+        self.assertNotIn(nid, P.COUNTRY_RETRY)
+        self.assertEqual(self.st.node(nid)["country"], "JP")
+
+    def test_country_clear_back_to_auto(self):
+        """清空地区 = 恢复自动识别（旧版被内存集合挡着，只能重启中心）"""
+        nid, _ = self.st.add_node("清空地区")
+        self._post(f"/api/nodes/{nid}", {"country": "US"}, token="admin-test")
+        self.assertEqual(self.st.node(nid)["country_src"], "manual")
+        P.COUNTRY_RETRY[nid] = {"next": time.time() + 3600, "tries": 5}    # 人为拉黑
+        code, body = self._post(f"/api/nodes/{nid}", {"country": ""}, token="admin-test")
+        self.assertEqual(code, 200, body)
+        n = self.st.node(nid)
+        self.assertEqual((n["country"], n["country_src"]), ("", ""))
+        self.assertNotIn(nid, P.COUNTRY_RETRY)
+        self.assertFalse(n["country_ip"])
+
+    def test_country_auto_detect_writes_source(self):
+        """自动识别成功后写 country/ip/时间，来源记 auto"""
+        nid, _ = self.st.add_node("自动识别", "JP")
+        self.st.conn.execute("UPDATE nodes SET country='', public_ip='8.8.4.4' WHERE id=?", (nid,))
+        self.st.conn.commit()
+        orig = P.detect_country
+        P.detect_country = lambda ip: ("JP", "test", "")
+        try:
+            self.st._country_work(nid, "8.8.4.4")
+        finally:
+            P.detect_country = orig
+        n = self.st.node(nid)
+        self.assertEqual((n["country"], n["country_src"], n["country_ip"]), ("JP", "auto", "8.8.4.4"))
+        self.assertGreater(n["country_ts"], 0)
+
+    def test_provision_nodes_list_and_remove(self):
         """供应令牌：能列出自己建的节点，也能在卸载探针后删节点（面板「卸载探针」用）"""
         _, tok = self.st.add_ptoken("fwpanel2")
         code, body = self._post("/api/provision/node", {"alias": "面板建的A"}, token=tok, csrf=False)

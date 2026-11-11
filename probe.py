@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.17"
+VERSION = "0.5.18"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -433,6 +433,16 @@ class Store:
         if "src" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN src TEXT DEFAULT ''")
             self.conn.commit()
+        # v0.5.18：记录地区是自动识别还是人工填的（自动值永不覆盖手工值，清空后回到自动）
+        if "country_src" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN country_src TEXT DEFAULT ''")
+            self.conn.commit()
+        if "country_ip" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN country_ip TEXT DEFAULT ''")
+            self.conn.commit()
+        if "country_ts" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN country_ts INTEGER DEFAULT 0")
+            self.conn.commit()
         self.conn.execute("UPDATE nodes SET country='UK' WHERE UPPER(country)='GB'")
         self.conn.commit()
 
@@ -459,7 +469,8 @@ class Store:
         if "tags" in fields:
             fields["tags"] = dump_tags(fields.pop("tags"))
         allowed = {"alias", "grp", "groups", "quota_bytes", "expires_at", "note", "enabled",
-                   "country", "tags", "target_ver", "pending_uninstall", "src"}
+                   "country", "country_src", "country_ip", "country_ts",
+                   "tags", "target_ver", "pending_uninstall", "src"}
         kv = {k: v for k, v in fields.items() if k in allowed}
         if not kv:
             return False
@@ -514,6 +525,15 @@ class Store:
             return [dict(r) for r in self.conn.execute(
                 "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (int(limit),))]
 
+    def set_country(self, nid, code, src="auto", ip="", ts=0):
+        """写地区 + 来源（auto/manual）+ 识别用的 IP + 时间，供后台展示「为什么是这个旗标」。"""
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE nodes SET country=?, country_src=?, country_ip=?, country_ts=? WHERE id=?",
+                (norm_country(code), src or "", ip or "", int(ts or 0), nid))
+            self.conn.commit()
+            return cur.rowcount > 0
+
     def delete_node(self, nid):
         with self.lock:
             self.conn.execute("DELETE FROM nodes WHERE id=?", (nid,))
@@ -567,29 +587,36 @@ class Store:
                  payload.get("kernel") or "", payload.get("hostname") or "",
                  payload.get("agent") or "", peer_ip or "", node["id"]))
             self.conn.commit()
-        self._maybe_country(node, peer_ip)
+        self._maybe_country(node["id"], peer_ip)
         return now
 
-    def _maybe_country(self, node, peer_ip):
-        """新节点首次上报：后台查一次归属地，写回 country（后台可手动覆盖）。"""
-        if node.get("country"):
-            return
-        key = node["id"]
-        if key in COUNTRY_DONE:
-            return
-        COUNTRY_DONE.add(key)
+    def _maybe_country(self, nid, peer_ip):
+        """节点还没有地区时自动识别；失败按 30s→1h 退避重试，不再一锤子永久放弃。
 
-        def work():
-            code = lookup_country(peer_ip)
-            if not code:
-                COUNTRY_DONE.discard(key)        # 下次上报再试
-                return
-            try:
-                self.update_node(key, country=code)
-            except Exception:
-                pass
+        手工填过的（country_src='manual'）不碰；后台清空地区后自动回到这里重新识别。
+        """
+        n = self.node(nid) or {}
+        if not n:
+            return
+        if (n.get("country") or "").strip():
+            reset_country_schedule(nid)
+            return
+        if not schedule_country(nid):
+            return
+        threading.Thread(target=self._country_work, args=(nid, peer_ip), daemon=True).start()
 
-        threading.Thread(target=work, daemon=True).start()
+    def _country_work(self, nid, peer_ip):
+        code, source, err = detect_country(peer_ip)
+        if not code:
+            log(f"归属地识别失败 node={nid} ip={peer_ip or '-'} 原因={err}")
+            return
+        try:
+            self.set_country(nid, code, "auto", peer_ip or "", int(time.time()))
+            reset_country_schedule(nid)
+            log(f"归属地识别 node={nid} ip={peer_ip or '-'} -> {code}（{source}）")
+        except Exception as exc:                      # 写库失败：把退避清掉，下次上报立刻再试
+            reset_country_schedule(nid)
+            log(f"归属地写库失败 node={nid}: {exc}")
 
     # -- 查询 ---------------------------------------------------------------
     def latest(self, nid):
@@ -771,8 +798,35 @@ class Store:
 THREE_WINDOW = 3600        # 三网展示窗口：最近 1 小时
 THREE_BUCKETS = 20         # 20 格 → 每格 3 分钟（对齐 Komari Glassmorphism 主题）
 
-COUNTRY_CACHE = {}
-COUNTRY_DONE = set()
+COUNTRY_CACHE = {}          # 公网 IP → 国家码（process 内）
+COUNTRY_RETRY = {}          # node_id → {"next": 下次可试时间, "tries": 已试次数}
+COUNTRY_LOCK = threading.Lock()
+COUNTRY_BACKOFF = (30, 60, 120, 300, 900, 1800, 3600)   # 失败退避，最长 1 小时
+
+
+def log(msg):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def schedule_country(nid, now=None):
+    """登记一次自动识别尝试。返回 True = 现在可以试（并已排好下一次退避）。"""
+    now = time.time() if now is None else now
+    with COUNTRY_LOCK:
+        st = COUNTRY_RETRY.get(nid) or {"next": 0, "tries": 0}
+        if now < st["next"]:
+            return False
+        st["next"] = now + COUNTRY_BACKOFF[min(st["tries"], len(COUNTRY_BACKOFF) - 1)]
+        st["tries"] = int(st["tries"]) + 1
+        COUNTRY_RETRY[nid] = st
+        return True
+
+
+def reset_country_schedule(nid=None):
+    with COUNTRY_LOCK:
+        if nid is None:
+            COUNTRY_RETRY.clear()
+        else:
+            COUNTRY_RETRY.pop(nid, None)
 
 
 # 英国两种写法都存在（ISO 是 GB，口语/分组常用 UK）。展示层统一用 UK：
@@ -781,48 +835,71 @@ CC_CANON = {"GB": "UK", "EL": "GR"}
 
 
 def norm_country(code: str) -> str:
+    """只保留合法的两位字母代码（GB→UK）；非法输入返回空串，由调用方决定报错还是留空。"""
     c = (code or "").strip().upper()
-    if not c:
+    if not re.fullmatch(r"[A-Z]{2}", c):
         return ""
-    return CC_CANON.get(c, c[:2])
+    return CC_CANON.get(c, c)
 
 
-def lookup_country(ip: str):
-    """按 IP 查国家代码（只在新节点首次上报时查一次，失败静默）。
+# 归属地数据源（按顺序尝试）：ipinfo 对机房 IP 最准，ip-api 兜底，ipwho.is 再兜一层
+COUNTRY_SOURCES = (
+    ("ipinfo", "https://ipinfo.io{path}/json", "country"),
+    ("ip-api", "http://ip-api.com/json{path}?fields=countryCode,status,message", "countryCode"),
+    ("ipwho", "https://ipwho.is{path}", "country_code"),
+)
+
+
+def _country_code_from(body: str, key: str):
+    """从各家返回里取两位国家码（JSON 或纯文本）。返回 (code, 失败原因)。"""
+    if not body:
+        return "", "空响应"
+    if body.startswith("{"):
+        try:
+            obj = json.loads(body)
+        except ValueError:
+            return "", "响应不是合法 JSON"
+        if obj.get("success") is False:
+            return "", str(obj.get("message") or obj.get("reason") or "接口返回失败")[:40]
+        code = str(obj.get(key) or obj.get("country") or obj.get("countryCode") or "").upper()
+    else:
+        code = body[:2].upper()
+    if len(code) == 2 and code.isalpha():
+        return norm_country(code), ""
+    return "", "没有国家码"
+
+
+def detect_country(ip: str):
+    """查 IP 归属地，返回 (国家码, 命中的源, 失败原因)。
 
     内网/回环来源（agent 与中心同机、或同内网）拿不到真实出口 IP —— 这时查「本机自己的归属地」，
     对这两类场景正好是对的；真正的公网来源照常用它的 IP 查。
-
-    源顺序：ipinfo.io 优先（对机房 IP 更准），ip-api 兜底。
-    ⚠ 实测 ip-api 按 ASN 注册地判，会把「ASN 注册在香港、机器在英国」的机房判成 HK。
+    源顺序：ipinfo.io → ip-api → ipwho.is（单个源不通不影响出结果）。
     """
     self_lookup = not ip or is_private_ip(ip)
     if not self_lookup and ip in COUNTRY_CACHE:
-        return COUNTRY_CACHE[ip]
-    if self_lookup:
-        urls = ("https://ipinfo.io/json", "http://ip-api.com/json/?fields=countryCode")
-    else:
-        urls = (f"https://ipinfo.io/{ip}/json",
-                f"http://ip-api.com/json/{ip}?fields=countryCode")
-    for url in urls:
+        return COUNTRY_CACHE[ip], "cache", ""
+    errs = []
+    for name, tpl, key in COUNTRY_SOURCES:
+        url = tpl.format(path="" if self_lookup else "/" + ip)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{VERSION}"})
             with urllib.request.urlopen(req, timeout=5) as r:
                 body = r.read().decode("utf-8", "replace").strip()
-            code = ""
-            if body.startswith("{"):
-                obj = json.loads(body)
-                code = (obj.get("country") or obj.get("countryCode") or "").upper()
-            else:
-                code = body[:2].upper()
-            if len(code) == 2 and code.isalpha():
-                code = norm_country(code)
+            code, err = _country_code_from(body, key)
+            if code:
                 if not self_lookup:
                     COUNTRY_CACHE[ip] = code
-                return code
-        except Exception:
-            continue
-    return ""
+                return code, name, ""
+            errs.append(f"{name}:{err}")
+        except Exception as exc:
+            errs.append(f"{name}:{type(exc).__name__}")
+    return "", "", "；".join(errs) or "没有可用数据源"
+
+
+def lookup_country(ip: str):
+    """兼容旧调用：只要国家码。"""
+    return detect_country(ip)[0]
 
 
 def is_private_ip(ip: str) -> bool:
@@ -1223,6 +1300,36 @@ class Handler(BaseHTTPRequestHandler):
             if not self._csrf_ok():
                 return self._send(403, {"error": "缺少 X-IPROBE 头"})
             rest = path[len("/api/nodes/"):].strip("/")
+            if rest == "country-refresh-all":          # 所有还没有地区的节点立即重新识别
+                updated, failed = [], []
+                for n in self.store.nodes():
+                    if (n.get("country") or "").strip():
+                        continue
+                    code, source, err = detect_country(n.get("public_ip") or "")
+                    if code:
+                        self.store.set_country(n["id"], code, "auto", n.get("public_ip") or "",
+                                               int(time.time()))
+                        reset_country_schedule(n["id"])
+                        updated.append({"id": n["id"], "alias": n.get("alias"), "country": code})
+                    else:
+                        failed.append({"id": n["id"], "alias": n.get("alias"), "error": err})
+                self.store.audit("country_refresh_all", "", f"成功 {len(updated)} / 失败 {len(failed)}",
+                                 self._peer_ip())
+                return self._send(200, {"ok": True, "updated": updated, "failed": failed})
+            if rest.endswith("/country-refresh"):      # 单台重新识别（按已记录的来源 IP）
+                nid = rest[:-len("/country-refresh")].strip("/")
+                node = self.store.node(nid)
+                if not node:
+                    return self._send(404, {"error": "节点不存在"})
+                ip = node.get("public_ip") or ""
+                code, source, err = detect_country(ip)
+                if not code:
+                    return self._send(502, {"error": f"识别失败：{err or '没有可用数据源'}"})
+                self.store.set_country(nid, code, "auto", ip, int(time.time()))
+                reset_country_schedule(nid)
+                self.store.audit("country_refresh", node.get("alias") or nid,
+                                 f"{code}（{source}）", self._peer_ip())
+                return self._send(200, {"ok": True, "country": code, "source": source})
             if rest.endswith("/upgrade"):             # 下发升级指令（agent 下次上报时执行）
                 nid = rest[:-len("/upgrade")].strip("/")
                 node = self.store.node(nid)
@@ -1259,7 +1366,14 @@ class Handler(BaseHTTPRequestHandler):
             nid = rest
             data = self._json_body() or {}
             if "country" in data:
-                data["country"] = norm_country(data.get("country") or "")
+                raw = str(data.get("country") or "").strip().upper()
+                if raw and not re.fullmatch(r"[A-Z]{2}", raw):
+                    return self._send(400, {"error": "地区代码必须是两位字母，例如 JP / UK"})
+                data["country"] = norm_country(raw)
+                data["country_ip"] = ""
+                data["country_ts"] = int(time.time()) if raw else 0
+                data["country_src"] = "manual" if raw else ""
+                reset_country_schedule(nid)      # 改成手动 / 清空回自动：两种都重置退避
             if not self.store.update_node(nid, **data):
                 return self._send(404, {"error": "节点不存在或无有效字段"})
             node = self.store.node(nid) or {}

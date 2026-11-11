@@ -77,6 +77,23 @@
   .sw{display:flex;gap:4px;flex-wrap:wrap}
   .sw i{width:18px;height:18px;border-radius:5px;cursor:pointer;border:2px solid transparent;display:block}
   .sw i.on{border-color:var(--text)}
+  /* 地区选择器（旗帜 + 中文名 + 代码） */
+  .cpick{position:relative}
+  .cpick-btn{width:100%;display:flex;align-items:center;gap:8px;text-align:left;padding:8px 10px}
+  .cpick-btn .flag{font-size:16px;line-height:1}
+  .cpick-btn i{margin-left:auto;color:var(--muted);font-style:normal}
+  .cpick-pop{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:30;background:var(--solid);
+    border:1px solid var(--border);border-radius:11px;box-shadow:0 16px 40px rgba(0,0,0,.45);padding:8px}
+  .cpick-list{max-height:230px;overflow:auto;margin-top:6px}
+  .cpick-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:13px}
+  .cpick-row:hover{background:var(--hover)}
+  .cpick-row .flag{font-size:15px;line-height:1}
+  .cpick-row .cc{margin-left:auto;color:var(--muted);font-size:11.5px;font-family:ui-monospace,Menlo,monospace}
+  .cpick-row.auto{border-bottom:1px dashed var(--border);border-radius:8px 8px 0 0;margin-bottom:4px}
+  .ccbtn{display:inline-flex;align-items:center;gap:6px;background:none;border:0;padding:2px 5px;
+    cursor:pointer;font-size:13px;color:var(--text);border-radius:7px}
+  .ccbtn:hover{background:var(--hover)}
+  .ccbtn .badge{font-size:10.5px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:0 5px}
   .cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.6;
     background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:9px;padding:10px 12px;
     white-space:pre-wrap;word-break:break-all;margin:8px 0}
@@ -133,12 +150,13 @@
         <button onclick="openGroups()">分组管理</button>
         <button onclick="openAudit()">操作日志</button>
         <button class="primary" id="up_all" onclick="upgradeAll()" hidden></button>
+        <button id="cc_all" onclick="refreshCountryAll()" hidden></button>
         <span class="sp"></span>
         <span class="muted small" id="counts"></span>
       </div>
       <table>
         <thead><tr>
-          <th>节点</th><th>分组</th><th>标签</th><th>状态</th><th>Agent</th><th>到期 / 配额</th><th></th>
+          <th>节点</th><th>地区</th><th>分组</th><th>标签</th><th>状态</th><th>Agent</th><th>到期 / 配额</th><th></th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -152,6 +170,21 @@
   <div class="dlg">
     <h2 id="ed_title">编辑节点</h2>
     <div class="f"><label>别名</label><input id="ed_alias" placeholder="例如 香港-1"></div>
+    <div class="f"><label>地区与旗帜（自动识别不对就手动选，留「自动识别」= 跟随上报 IP）</label>
+      <div class="cpick">
+        <button type="button" class="cpick-btn" id="ed_country_btn" onclick="togglePick()">
+          <span class="flag" id="ed_country_flag">🌐</span>
+          <span id="ed_country_label">自动识别</span><i>▾</i>
+        </button>
+        <div class="cpick-pop" id="ed_country_pop" hidden>
+          <input id="ed_country_q" placeholder="搜索国家或代码（日本 / JP），回车用自定义代码" autocomplete="off"
+                 oninput="renderPick()" onkeydown="if(event.key==='Enter'){event.preventDefault();pickCountry($('ed_country_q').value)}">
+          <div class="cpick-list" id="ed_country_list"></div>
+        </div>
+      </div>
+      <input type="hidden" id="ed_country">
+      <div class="muted small" id="ed_country_hint" style="margin-top:5px"></div>
+    </div>
     <div class="f"><label>分组（可多选，也可新建）</label>
       <div class="chips" id="ed_groups"></div>
       <div style="display:flex;gap:8px;margin-top:8px">
@@ -171,8 +204,6 @@
       <div class="f"><label>配额（GB，留空=不限）</label><input id="ed_quota" type="number" min="0" step="1" placeholder="不限"></div>
       <div class="f"><label>到期日</label><input id="ed_expires" type="date"></div>
     </div>
-    <div class="f"><label>地区代码（两位，如 GB / HK / JP；留空 = 自动识别）</label>
-      <input id="ed_country" maxlength="2" placeholder="自动，如 UK/HK/JP" style="text-transform:uppercase"></div>
     <div class="f"><label>备注（只在后台可见）</label><input id="ed_note" placeholder="可选"></div>
     <div class="dlgfoot">
       <button onclick="closeMask('m_edit')">取消</button>
@@ -255,6 +286,96 @@ const flag = c => {
   s = FLAG_ALIAS[s] || s;
   return String.fromCodePoint(...[...s].map(ch => 127397 + ch.charCodeAt(0)));
 };
+
+/* 常用国家/地区（代码 + 中文名）。没列到的可以搜索框里直接打两位代码回车。 */
+const COUNTRIES = [
+  ["JP","日本"],["KR","韩国"],["SG","新加坡"],["HK","香港"],["TW","台湾"],["MO","澳门"],
+  ["US","美国"],["CA","加拿大"],["GB","英国"],["DE","德国"],["FR","法国"],["NL","荷兰"],
+  ["RU","俄罗斯"],["AU","澳大利亚"],["NZ","新西兰"],["IN","印度"],["ID","印尼"],["MY","马来西亚"],
+  ["TH","泰国"],["VN","越南"],["PH","菲律宾"],["KH","柬埔寨"],["LA","老挝"],["MM","缅甸"],
+  ["BD","孟加拉"],["PK","巴基斯坦"],["NP","尼泊尔"],["LK","斯里兰卡"],["MN","蒙古"],["KZ","哈萨克斯坦"],
+  ["UZ","乌兹别克斯坦"],["AE","阿联酋"],["SA","沙特"],["QA","卡塔尔"],["KW","科威特"],["BH","巴林"],
+  ["OM","阿曼"],["JO","约旦"],["LB","黎巴嫩"],["IL","以色列"],["TR","土耳其"],["IR","伊朗"],
+  ["IQ","伊拉克"],["EG","埃及"],["ZA","南非"],["NG","尼日利亚"],["KE","肯尼亚"],["MA","摩洛哥"],
+  ["TN","突尼斯"],["DZ","阿尔及利亚"],["GH","加纳"],["MU","毛里求斯"],["SE","瑞典"],["NO","挪威"],
+  ["FI","芬兰"],["DK","丹麦"],["IS","冰岛"],["IE","爱尔兰"],["PT","葡萄牙"],["ES","西班牙"],
+  ["IT","意大利"],["CH","瑞士"],["AT","奥地利"],["BE","比利时"],["LU","卢森堡"],["PL","波兰"],
+  ["CZ","捷克"],["SK","斯洛伐克"],["HU","匈牙利"],["RO","罗马尼亚"],["BG","保加利亚"],["GR","希腊"],
+  ["HR","克罗地亚"],["SI","斯洛文尼亚"],["RS","塞尔维亚"],["UA","乌克兰"],["BY","白俄罗斯"],["LT","立陶宛"],
+  ["LV","拉脱维亚"],["EE","爱沙尼亚"],["MD","摩尔多瓦"],["GE","格鲁吉亚"],["AM","亚美尼亚"],["AZ","阿塞拜疆"],
+  ["CY","塞浦路斯"],["MT","马耳他"],["BR","巴西"],["AR","阿根廷"],["CL","智利"],["CO","哥伦比亚"],
+  ["PE","秘鲁"],["VE","委内瑞拉"],["EC","厄瓜多尔"],["UY","乌拉圭"],["MX","墨西哥"],["PA","巴拿马"]
+];
+
+function countryCell(n) {
+  const cc = String(n.country || "").toUpperCase();
+  if (!cc) {
+    return `<span class="muted small">未识别</span>
+      <button class="ccbtn" onclick="refreshCountry('${n.id}',event)" title="按已记录的上报 IP 立即重新识别">重新识别</button>`;
+  }
+  const src = n.country_src === "manual" ? "手动" : "自动";
+  const tip = src === "手动" ? "手动设置（自动识别不会覆盖）"
+    : `自动识别${n.country_ip ? " · " + n.country_ip : ""}`;
+  return `<span class="ccbtn" onclick="openEdit('${n.id}')" title="${esc(tip)} ｜ 点击编辑">
+      <span class="flag">${flag(cc)}</span>${esc(cc)}<span class="badge">${src}</span></span>`;
+}
+
+function setCountryUI(code) {
+  code = String(code || "").toUpperCase();
+  if (code === "GB") code = "UK";
+  $("ed_country").value = code;
+  $("ed_country_flag").textContent = code ? flag(code) : "🌐";
+  const hit = COUNTRIES.find(c => c[0] === (code === "UK" ? "GB" : code));
+  $("ed_country_label").textContent = code ? `${hit ? hit[1] : "自定义"} · ${code}` : "自动识别";
+}
+function togglePick() {
+  const p = $("ed_country_pop");
+  p.hidden = !p.hidden;
+  if (!p.hidden) { $("ed_country_q").value = ""; renderPick(); $("ed_country_q").focus(); }
+}
+function renderPick() {
+  const q = ($("ed_country_q").value || "").trim().toUpperCase();
+  const rows = COUNTRIES
+    .filter(c => !q || c[0].includes(q) || c[1].includes(q) || c[1].includes($("ed_country_q").value.trim()))
+    .map(c => `<div class="cpick-row" onclick="pickCountry('${c[0]}')">
+        <span class="flag">${flag(c[0])}</span><span class="cn">${esc(c[1])}</span>
+        <span class="cc">${c[0] === "GB" ? "UK" : c[0]}</span></div>`)
+    .join("");
+  const custom = (q.length === 2 && !COUNTRIES.some(c => c[0] === q))
+    ? `<div class="cpick-row" onclick="pickCountry('${q}')"><span class="flag">${flag(q)}</span>
+        <span class="cn">使用自定义代码</span><span class="cc">${q}</span></div>` : "";
+  $("ed_country_list").innerHTML =
+    `<div class="cpick-row auto" onclick="pickCountry('')"><span class="flag">🌐</span>
+       <span class="cn">自动识别（跟随上报 IP 归属地）</span></div>` + rows + custom;
+}
+function pickCountry(code) {
+  code = String(code || "").trim().toUpperCase();
+  if (code === "GB") code = "UK";
+  if (code && !/^[A-Z]{2}$/.test(code)) {
+    $("ed_country_hint").textContent = "地区代码必须是两位字母，例如 JP / UK";
+    return;
+  }
+  setCountryUI(code);
+  $("ed_country_pop").hidden = true;
+  $("ed_country_hint").textContent = code ? "" : "留空 = 每次都按上报 IP 自动识别";
+}
+async function refreshCountry(id, ev) {
+  if (ev) ev.stopPropagation();
+  try {
+    const r = await API("/api/nodes/" + id + "/country-refresh", {method: "POST", body: "{}"});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || "识别失败"); return; }
+    await load();
+  } catch (e) { alert("识别失败：" + e); }
+}
+async function refreshCountryAll() {
+  const r = await API("/api/nodes/country-refresh-all", {method: "POST", body: "{}"});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "识别失败"); return; }
+  await load();
+  const ok = (d.updated || []).length, bad = (d.failed || []).length;
+  if (bad) alert(`已识别 ${ok} 台，仍有 ${bad} 台失败：` + (d.failed || []).map(f => `${f.alias || f.id}（${f.error}）`).join("；"));
+}
 function ago(ts) {
   if (!ts) return "从未";
   const d = Math.max(0, Math.floor(Date.now() / 1000 - ts));
@@ -306,6 +427,10 @@ async function load() {
 function renderRows() {
   $("empty").hidden = NODES.length > 0;
   $("counts").textContent = NODES.length ? `共 ${NODES.length} 台` : "";
+  const noCc = NODES.filter(n => !n.country).length;
+  const ccBtn = $("cc_all");
+  ccBtn.hidden = noCc === 0;
+  ccBtn.textContent = `重新识别地区（${noCc} 台未识别）`;
   const outdated = META.agent_version ? NODES.filter(n => n.agent_ver !== META.agent_version) : [];
   const upBtn = $("up_all");
   upBtn.hidden = outdated.length === 0;
@@ -320,8 +445,9 @@ function renderRows() {
     const quota = n.quota_bytes ? `${fmtBytes(n.used_bytes || 0)} / ${fmtBytes(n.quota_bytes)}` : "不限";
     const exp = n.expires_at || "—";
     return `<tr>
-      <td data-k="节点"><b>${flag(n.country)} ${esc(n.alias || n.id)}</b>
+      <td data-k="节点"><b>${esc(n.alias || n.id)}</b>
         <div class="muted small">${esc(n.os_name || n.os_id || "")}</div></td>
+      <td data-k="地区">${countryCell(n)}</td>
       <td data-k="分组"><div class="tags">${gl.length ? gl.map(g => `<span class="tag">${esc(g)}</span>`).join("") : '<span class="muted small">—</span>'}</div></td>
       <td data-k="标签"><div class="tags">${tags || '<span class="muted small">—</span>'}</div></td>
       <td data-k="状态"><span class="dot ${n.online ? "" : "off"}"></span>
@@ -361,7 +487,9 @@ function openAdd() {
   $("ed_expires").value = "";
   $("ed_note").value = "";
   $("ed_newgroup").value = "";
-  $("ed_country").value = "";
+  setCountryUI("");
+  $("ed_country_pop").hidden = true;
+  $("ed_country_hint").textContent = "留空 = 每次都按上报 IP 自动识别";
   TAGS = [];
   PICK = COLORS[0];
   renderGroupChips([]);
@@ -379,7 +507,11 @@ function openEdit(id) {
   $("ed_quota").value = n.quota_bytes ? Math.round(n.quota_bytes / 1024 / 1024 / 1024) || "" : "";
   $("ed_expires").value = n.expires_at || "";
   $("ed_note").value = n.note || "";
-  $("ed_country").value = n.country || "";
+  setCountryUI(n.country || "");
+  $("ed_country_pop").hidden = true;
+  $("ed_country_hint").textContent = !n.country ? "还没识别到，可手动选，或点表格里的「重新识别」"
+    : n.country_src === "manual" ? "手动设置（自动识别不会覆盖；选「自动识别」可恢复）"
+    : `自动识别${n.country_ip ? " · 来源 IP " + n.country_ip : ""}`;
   $("ed_newgroup").value = "";
   TAGS = (n.tags || []).map(t => ({t: t.t, c: safeColor(t.c)}));
   PICK = COLORS[0];
@@ -440,6 +572,8 @@ async function saveNode() {
   // 输入框里还有没点「添加」的文字，直接算进去，免得白填
   if ($("ed_tagtext").value.trim()) addTag();
   const quotaGb = Number($("ed_quota").value || 0);
+  const cc = String($("ed_country").value || "").trim().toUpperCase();
+  if (cc && !/^[A-Z]{2}$/.test(cc)) { alert("地区代码必须是两位字母，例如 JP / UK"); return; }
   const body = {
     alias,
     groups: [...SEL_GROUPS],
@@ -447,7 +581,7 @@ async function saveNode() {
     quota_bytes: quotaGb > 0 ? Math.round(quotaGb * 1024 * 1024 * 1024) : 0,
     expires_at: $("ed_expires").value || "",
     note: $("ed_note").value.trim(),
-    country: ($("ed_country").value || "").trim().toUpperCase()
+    country: cc
   };
   const r = EDITING
     ? await API("/api/nodes/" + EDITING, {method: "POST", body: JSON.stringify(body)})
@@ -569,6 +703,7 @@ async function openAudit() {
   const r = await API("/api/admin/audit");
   const d = await r.json().catch(() => ({items: []}));
   const name = {node_add: "新增节点", node_update: "修改节点", node_delete: "删除节点",
+                country_refresh: "重新识别地区", country_refresh_all: "批量识别地区",
                 token_rotate: "重发令牌", group_rename: "分组重命名", login: "登录", login_fail: "登录失败"};
   $("audit_list").innerHTML = (d.items || []).map(a =>
     `<div><span class="muted" style="min-width:132px">${new Date(a.ts * 1000).toLocaleString("zh-CN")}</span>
@@ -585,6 +720,14 @@ document.addEventListener("DOMContentLoaded", () => {
   $("tok").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
   document.querySelectorAll(".mask").forEach(m =>
     m.addEventListener("click", e => { if (e.target === m) m.classList.remove("show"); }));
+  // 点地区选择器以外的地方 / 按 Esc 收起来
+  document.addEventListener("click", e => {
+    const p = $("ed_country_pop");
+    if (p && !p.hidden && !e.target.closest(".cpick")) p.hidden = true;
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") { const p = $("ed_country_pop"); if (p) p.hidden = true; }
+  });
   boot();
 });
 </script>
