@@ -96,7 +96,8 @@
     align-items:flex-start;justify-content:center;z-index:20;overflow:auto;padding:6vh 16px}
   .mask.show{display:flex}
   .dlg{width:100%;max-width:560px;background:var(--solid);border:1px solid var(--border);border-radius:14px;
-    box-shadow:0 20px 60px rgba(0,0,0,.5);padding:18px 20px}
+    box-shadow:0 20px 60px rgba(0,0,0,.5);padding:18px 20px;
+    max-height:calc(100vh - 11vh);overflow:auto;overscroll-behavior:contain}
   .dlg h2{font-size:16px;margin:0 0 12px}
   .f{margin-bottom:12px}
   .f label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
@@ -131,7 +132,10 @@
     background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:9px;padding:10px 12px;
     white-space:pre-wrap;word-break:break-all;margin:8px 0}
   .hint{font-size:12px;color:var(--warn);margin:6px 0 0}
-  .dlgfoot{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  /* 底部按钮常驻：内容在弹窗内部滚动，按钮不跟着滚走 */
+  .dlgfoot{display:flex;gap:8px;justify-content:flex-end;margin:16px -20px 0;padding:12px 20px 14px;
+    position:sticky;bottom:0;z-index:2;background:var(--solid);
+    border-top:1px solid var(--border);border-radius:0 0 13px 13px}
   .audit{max-height:320px;overflow:auto;font-size:12.5px}
   .audit div{display:flex;gap:10px;padding:5px 0;border-bottom:1px dashed var(--border)}
   .audit b{font-weight:600}
