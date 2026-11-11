@@ -40,7 +40,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.11"
+VERSION = "0.5.12"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
@@ -568,6 +568,7 @@ class Sampler:
         payload["checks"] = self.last_checks or []
         payload["checks_ts"] = int(self.last_checks_ts) if self.last_checks else 0
         payload["targets_ver"] = targets_signature(self.cfg.get("targets"))
+        payload["uid"] = os.geteuid()
         return payload
 
 
@@ -615,6 +616,18 @@ def spool_flush(cfg):
         except Exception:
             break                      # 还连不上就停下，下一轮再试
     return sent
+
+
+# --------------------------------------------------------------------------- 权限
+def as_root(cmd):
+    """非 root 运行时借 sudo 跑（安装脚本用 --as-user 时只放行 restart 和卸载脚本两条）。
+    root 模式下原样返回，行为不变。"""
+    if os.geteuid() == 0:
+        return list(cmd)
+    return ["/usr/bin/sudo", "-n"] + list(cmd)
+
+
+UNINSTALL_HELPER = "/usr/local/sbin/fwprobe-agent-uninstall.sh"
 
 
 # --------------------------------------------------------------------------- 自升级
@@ -671,8 +684,9 @@ def perform_upgrade(cfg, spec):
         return False
 
     unit = str(cfg.get("service") or "fwprobe-agent")
+    restart = " ".join(as_root(["/bin/systemctl", "restart", unit]))
     try:                                            # 脱离父进程，2 秒后重启（避开本轮上报收尾）
-        subprocess.Popen(["/bin/sh", "-c", f"sleep 2; /bin/systemctl restart {unit}"],
+        subprocess.Popen(["/bin/sh", "-c", f"sleep 2; exec {restart}"],
                          start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
         print(f"[upgrade] 重启失败，请手动 systemctl restart {unit}：{exc}", file=sys.stderr, flush=True)
@@ -685,7 +699,10 @@ def perform_uninstall(cfg):
         post_report(cfg, {"agent": VERSION, "ts": int(time.time()), "agent_uninstall_ack": True})
     except Exception as exc:
         print(f"[uninstall] 回执失败（继续卸载）：{exc}", file=sys.stderr, flush=True)
-    script = (
+    if os.geteuid() != 0 and os.access(UNINSTALL_HELPER, os.X_OK):
+        script = f"sleep 2; exec /usr/bin/sudo -n {UNINSTALL_HELPER}"
+    else:
+        script = (
         "sleep 2; "
         "/bin/systemctl stop fwprobe-agent 2>/dev/null; "
         "/bin/systemctl disable fwprobe-agent 2>/dev/null; "

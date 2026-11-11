@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.25"
+VERSION = "0.5.26"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_rx_total INTEGER DEFAULT -1,   -- agent 上次上报的累计计数器（识别重启归零）
     last_tx_total INTEGER DEFAULT -1,
     agent_ver   TEXT DEFAULT '',
+    agent_uid   INTEGER DEFAULT -1,     -- agent 进程的 uid：0=root，其它=低权限模式（-1 未知/老版本）
     target_ver  TEXT DEFAULT '',      -- 升级目标版本，agent 升到后清空
     pending_uninstall INTEGER DEFAULT 0,  -- 中心点了「卸载探针」，等 agent 下次上报执行
     src         TEXT DEFAULT '',      -- 外部面板的节点 id（面板卸载时用它精确匹配）
@@ -557,6 +558,7 @@ class Store:
         # v0.5.24：配额周期 + 到期滚动
         for col, ddl in (("quota_mode", "TEXT DEFAULT ''"), ("quota_start", "TEXT DEFAULT ''"),
                          ("renew_mode", "TEXT DEFAULT ''"), ("renew_start", "TEXT DEFAULT ''"),
+                         ("agent_uid", "INTEGER DEFAULT -1"),
                          ("cyc_start", "INTEGER DEFAULT 0"), ("cyc_rx", "INTEGER DEFAULT 0"),
                          ("cyc_tx", "INTEGER DEFAULT 0"),
                          ("last_rx_total", "INTEGER DEFAULT -1"),
@@ -824,10 +826,12 @@ class Store:
                 "UPDATE nodes SET last_seen=?, os_id=COALESCE(NULLIF(?,''),os_id),"
                 " os_name=COALESCE(NULLIF(?,''),os_name), kernel=COALESCE(NULLIF(?,''),kernel),"
                 " hostname=COALESCE(NULLIF(?,''),hostname), agent_ver=COALESCE(NULLIF(?,''),agent_ver),"
+                " agent_uid=COALESCE(?,agent_uid),"
                 " public_ip=? WHERE id=?",
                 (now, payload.get("os_id") or "", payload.get("os_name") or "",
                  payload.get("kernel") or "", payload.get("hostname") or "",
-                 payload.get("agent") or "", peer_ip or "", node["id"]))
+                 payload.get("agent") or "", payload.get("uid"),
+                 peer_ip or "", node["id"]))
             self.conn.commit()
         self._maybe_country(node["id"], peer_ip)
         return now
@@ -1563,6 +1567,8 @@ class Handler(BaseHTTPRequestHandler):
                 n["tags"] = parse_tags(n.get("tags"))
                 n["groups_list"] = parse_groups(n.get("groups"), n.get("grp") or "")
                 n["can_self_upgrade"] = _ver_tuple(n.get("agent_ver")) >= UPGRADE_MIN_VER
+                uid = n.get("agent_uid")
+                n["low_priv"] = (uid is not None and int(uid) > 0)   # 专用用户跑 = 非 root
                 seen = int(n.get("last_seen") or 0)
                 n["online"] = bool(seen) and (now - seen < OFFLINE_AFTER)
                 rx, tx = self.store.lifetime(n["id"])

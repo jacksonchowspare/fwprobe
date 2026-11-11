@@ -9,6 +9,7 @@ import json
 import pathlib
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -606,6 +607,42 @@ class TestTrafficAccounting(unittest.TestCase):
         self.assertTrue(n["quota_start"] and n["renew_start"])
 
 
+class TestLowPrivAgent(unittest.TestCase):
+    """agent 非 root 运行（安装脚本 --as-user）"""
+
+    def test_as_root_uses_sudo_when_not_root(self):
+        orig = A.os.geteuid
+        A.os.geteuid = lambda: 1000
+        try:
+            self.assertEqual(A.as_root(["/bin/systemctl", "restart", "fwprobe-agent"]),
+                             ["/usr/bin/sudo", "-n", "/bin/systemctl", "restart", "fwprobe-agent"])
+        finally:
+            A.os.geteuid = orig
+
+    def test_as_root_passthrough_for_root(self):
+        orig = A.os.geteuid
+        A.os.geteuid = lambda: 0
+        try:
+            self.assertEqual(A.as_root(["/bin/ls"]), ["/bin/ls"])
+        finally:
+            A.os.geteuid = orig
+
+    def test_payload_carries_uid(self):
+        cfg = {"server": "", "token": "", "interval": 30, "check_interval": 60, "targets": []}
+        s = A.Sampler(cfg)
+        s.sample()
+        self.assertEqual(s.sample().get("uid"), os.geteuid())
+
+    def test_installer_supports_user_mode(self):
+        src = pathlib.Path(ROOT, "install-agent.sh").read_text(encoding="utf-8")
+        for token in ("--as-user", "useradd --system", "AmbientCapabilities=CAP_NET_RAW",
+                      "CapabilityBoundingSet=CAP_NET_RAW", "NOPASSWD: /bin/systemctl restart",
+                      "fwprobe-agent-uninstall.sh", "visudo -cf", "sudo -u \"$AGENT_USER\""):
+            self.assertIn(token, src)
+        self.assertEqual(subprocess.run(["bash", "-n", os.path.join(ROOT, "install-agent.sh")],
+                                        capture_output=True).returncode, 0)
+
+
 class TestOrdering(unittest.TestCase):
     """展示页卡片顺序（v0.5.19）：后台拖动 → nodes.sort_order → 公开页按序渲染"""
 
@@ -799,6 +836,18 @@ class TestHTTP(unittest.TestCase):
         self.assertEqual(n["cycle"]["reset_date"], P.add_months(P.local_date(), 1).isoformat())
         self.assertTrue(n["expires"]["auto"])
         self.assertEqual(n["expires_at"], n["expires"]["date"])
+
+    def test_report_stores_agent_uid(self):
+        """agent 上报带 uid：0=root，非 0=低权限模式，后台据此显示「低权限」小标"""
+        self._post("/api/report", {"agent": "0.5.12", "ts": int(time.time()), "uid": 0},
+                   token=self.tok)
+        self.assertEqual(int(self.st.node(self.nid)["agent_uid"]), 0)
+        self._post("/api/report", {"agent": "0.5.12", "ts": int(time.time()), "uid": 998},
+                   token=self.tok)
+        self.assertEqual(int(self.st.node(self.nid)["agent_uid"]), 998)
+        code, body = self._get("/api/nodes", token="admin-test")
+        node = [n for n in json.loads(body)["nodes"] if n["id"] == self.nid][0]
+        self.assertTrue(node["low_priv"])
 
     def test_report_pushes_targets(self):
         """0.5.11+ 的 agent 上报带 targets_ver：版本不一致就下发；一致/老 agent 不下发"""
