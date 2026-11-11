@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.33"
+VERSION = "0.5.34"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -727,47 +727,60 @@ class Store:
         """记下「旧名 → 新名」：以后 agent 再用旧名上报也会落成新名，库里的老数据也并过去。"""
         if not old or not name or old == name:
             return False
-        with self.lock:
-            self.conn.execute("INSERT OR REPLACE INTO aliases(old,name,ts) VALUES(?,?,?)",
-                              (old, name, int(time.time())))
-            self.conn.execute("UPDATE aliases SET name=? WHERE name=?", (name, old))  # 链式改名
-            for table in ("checks", "checks_min"):
-                # ⚠ 不能直接 UPDATE：同一台机器同一秒可能新旧两个名字都有行，
-                #    主键是 (node_id,ts,name)，改名会撞唯一约束。先删重复行再改名。
-                self.conn.execute(
-                    f"DELETE FROM {table} WHERE name=? AND EXISTS ("
-                    f" SELECT 1 FROM {table} x WHERE x.node_id={table}.node_id"
-                    f" AND x.ts={table}.ts AND x.name=?)", (old, name))
-                self.conn.execute(f"UPDATE {table} SET name=? WHERE name=?", (name, old))
-            self.conn.commit()
+        try:
+            with self.lock:
+                self.conn.execute("INSERT OR REPLACE INTO aliases(old,name,ts) VALUES(?,?,?)",
+                                  (old, name, int(time.time())))
+                self.conn.execute("UPDATE aliases SET name=? WHERE name=?", (name, old))  # 链式改名
+                for table in ("checks", "checks_min"):
+                    # ⚠ 不能直接 UPDATE：同一台机器同一秒可能新旧两个名字都有行，
+                    #    主键是 (node_id,ts,name)，改名会撞唯一约束。先删重复行再改名。
+                    self.conn.execute(
+                        f"DELETE FROM {table} WHERE name=? AND EXISTS ("
+                        f" SELECT 1 FROM {table} x WHERE x.node_id={table}.node_id"
+                        f" AND x.ts={table}.ts AND x.name=?)", (old, name))
+                    self.conn.execute(f"UPDATE {table} SET name=? WHERE name=?", (name, old))
+                self.conn.commit()
+        except Exception:
+            # ⚠ 必须回滚：异常被上层 catch 掉后，这条连接上的半截事务会在下一次 commit
+            #    时被一起提交（实测：checks 改完、checks_min 没改，名字只并了一半）
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            raise
         return True
 
     def repair_aliases(self):
         """把库里还在用旧名字的检查数据归一（早期改名留下的孤儿名，会让详情页曲线出现两套）。
 
-        规则保守：只有旧名恰好等于某目标的「地区+运营商」「运营商+地区」（含 v6 后缀）才并，
-        其余（用户自己起的名字、已删除的目标）一律不动。"""
+        规则保守：只有旧名等于「地区+运营商」「运营商+地区」（含 v6 后缀）这类老格式才并；
+        已经记过别名但库里还留着旧名行的，也在这里补刀并掉（幂等）。"""
         try:
             with self.lock:
                 names = {r["name"] for r in self.conn.execute("SELECT name FROM targets")}
-                known = {r["old"] for r in self.conn.execute("SELECT old FROM aliases")}
+                amap = {r["old"]: r["name"] for r in self.conn.execute("SELECT old,name FROM aliases")}
                 orphans = set()
                 for table in ("checks", "checks_min"):
                     for r in self.conn.execute(f"SELECT DISTINCT name FROM {table}"):
-                        if r["name"] not in names and r["name"] not in known:
+                        if r["name"] not in names:
                             orphans.add(r["name"])
             if not orphans:
                 return []
             tg = self.targets()
             fixed = []
             for o in orphans:
-                new = guess_target_alias(o, tg)
+                new = amap.get(o) or guess_target_alias(o, tg)
                 if new and new != o and self.record_alias(o, new):
                     fixed.append([o, new])
             if fixed:
                 print(f"[aliases] 历史名已归一：{fixed}", file=sys.stderr, flush=True)
             return fixed
         except Exception as exc:          # 清理失败不能拦住服务启动
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
             print(f"[aliases] 归一历史名失败：{exc}", file=sys.stderr, flush=True)
             return []
 

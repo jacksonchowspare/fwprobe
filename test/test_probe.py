@@ -724,6 +724,18 @@ class TestTargetAliases(unittest.TestCase):
             n = self.st.conn.execute("SELECT COUNT(*) c FROM checks_min").fetchone()["c"]
         self.assertEqual(n, 1)
 
+    def test_repair_heals_leftover_rows_for_known_alias(self):
+        """别名已经记了、但库里还留着旧名行（上次改名只并了一半）→ 启动时补刀并掉"""
+        now = int(time.time())
+        self.st.conn.execute("INSERT OR REPLACE INTO aliases(old,name,ts) VALUES('上海电信','电信·上海',?)",
+                             (now,))
+        self.st.conn.execute(
+            "INSERT OR REPLACE INTO checks(node_id,ts,name,ok,loss,ravg) VALUES(?,?,?,?,?,?)",
+            (self.nid, now, "上海电信", 1, 0.0, 30.0))
+        self.st.conn.commit()
+        self.assertIn(["上海电信", "电信·上海"], self.st.repair_aliases())
+        self.assertEqual(self._orphans(), ["电信·上海"])
+
     def test_guess_alias_ignores_custom_names(self):
         tg = self.st.targets()
         self.assertIsNone(P.guess_target_alias("我的线路A", tg))
