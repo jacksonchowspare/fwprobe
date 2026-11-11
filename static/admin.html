@@ -37,6 +37,13 @@
   button:disabled{opacity:.5;cursor:not-allowed}
   input,select{font:inherit;color:var(--text);background:var(--hover);border:1px solid var(--border);
     border-radius:9px;padding:7px 10px;width:100%}
+  /* 原生下拉的展开面板用的是 select 的底色：半透明会让选项变成"白底白字"，必须给实色 */
+  select{background:var(--solid);color-scheme:dark}
+  body[data-theme="light"] select{color-scheme:light}
+  select option{background:var(--solid);color:var(--text)}
+  select option:disabled{color:var(--muted)}
+  input[type=date],input[type=datetime-local]{color-scheme:dark}
+  body[data-theme="light"] input[type=date],body[data-theme="light"] input[type=datetime-local]{color-scheme:light}
   input:focus,select:focus{outline:none;border-color:rgba(77,163,255,.55)}
   .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:14px 16px}
   .muted{color:var(--muted)}
@@ -1143,15 +1150,19 @@ async function openAudit() {
 document.addEventListener("DOMContentLoaded", () => {
   setTheme(localStorage.getItem("iprobe_theme") || "dark");
   $("tok").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
-  document.querySelectorAll(".mask").forEach(m =>
-    m.addEventListener("click", e => { if (e.target === m) m.classList.remove("show"); }));
+  // 弹窗只在按「取消/关闭/保存」时关：点遮罩不再关闭（实测太容易误触，编辑内容全丢）
+  const openMaskId = () => { const m = document.querySelector(".mask.show"); return m ? m.id : ""; };
   // 点地区选择器以外的地方 / 按 Esc 收起来
   document.addEventListener("click", e => {
     const p = $("ed_country_pop");
     if (p && !p.hidden && !e.target.closest(".cpick")) p.hidden = true;
   });
   document.addEventListener("keydown", e => {
-    if (e.key === "Escape") { const p = $("ed_country_pop"); if (p) p.hidden = true; }
+    if (e.key !== "Escape") return;
+    const p = $("ed_country_pop");
+    if (p && !p.hidden) { p.hidden = true; return; }         // 先收地区弹层
+    const id = openMaskId();
+    if (id && id !== "m_cmd") closeMask(id);                  // 命令弹窗例外：token 只显示一次，别一键关掉
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !$("main").hidden) load();   // 切回来立刻刷新一次，不用等 15 秒
