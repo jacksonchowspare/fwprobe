@@ -58,6 +58,19 @@
   .dot.off{background:var(--bad)}
   .ops{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
   .ops button{padding:3px 9px;font-size:12px;border-radius:8px}
+  /* 展示顺序：按住 ⠿ 拖动整行 */
+  .ord{white-space:nowrap}
+  .grip{cursor:grab;color:var(--muted);font-size:15px;line-height:1;user-select:none;
+    padding:2px 3px;display:inline-block}
+  .grip:active{cursor:grabbing}
+  tr.dragging{opacity:.45}
+  tr.drop-target td{box-shadow:inset 0 2px 0 rgba(77,163,255,.85)}
+  .mvbtn{display:none;padding:1px 6px;font-size:11px;border-radius:6px;margin-left:3px}
+  tr:hover .mvbtn{display:inline-block}
+  .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(12px);
+    background:rgba(20,26,36,.94);color:#e8eef8;border:1px solid var(--border);border-radius:10px;
+    padding:8px 14px;font-size:12.5px;opacity:0;pointer-events:none;transition:.2s;z-index:40}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   /* 弹窗 */
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:none;
     align-items:flex-start;justify-content:center;z-index:20;overflow:auto;padding:6vh 16px}
@@ -111,6 +124,7 @@
     td{border:0;padding:4px 0;display:flex;gap:10px}
     td::before{content:attr(data-k);color:var(--muted);font-size:12px;min-width:56px;flex:none}
     .ops{justify-content:flex-start}
+    .mvbtn{display:inline-block}
   }
 </style>
 </head>
@@ -151,6 +165,7 @@
         <button onclick="load()">刷新</button>
         <button onclick="openGroups()">分组管理</button>
         <button onclick="openAudit()">操作日志</button>
+        <button onclick="resetOrder()" title="按创建时间重新排（改乱了可以一键复位）">恢复默认顺序</button>
         <button class="primary" id="up_all" onclick="upgradeAll()" hidden></button>
         <button id="cc_all" onclick="refreshCountryAll()" hidden></button>
         <span class="sp"></span>
@@ -158,7 +173,7 @@
       </div>
       <table>
         <thead><tr>
-          <th>节点</th><th>地区</th><th>分组</th><th>标签</th><th>状态</th><th>Agent</th><th>到期 / 配额</th><th></th>
+          <th style="width:40px" title="展示顺序：按住 ⠿ 拖动整行，或点 ↑↓">顺序</th><th>节点</th><th>地区</th><th>分组</th><th>标签</th><th>状态</th><th>Agent</th><th>到期 / 配额</th><th></th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -166,6 +181,7 @@
     </div>
   </div>
 </div>
+<div class="toast" id="toast"></div>
 
 <!-- 编辑 / 新增 -->
 <div class="mask" id="m_edit">
@@ -446,7 +462,10 @@ function renderRows() {
       `<span class="tag" style="color:${safeColor(t.c)};border-color:${safeColor(t.c)}55;background:${safeColor(t.c)}1f">${esc(t.t)}</span>`).join("");
     const quota = n.quota_bytes ? `${fmtBytes(n.used_bytes || 0)} / ${fmtBytes(n.quota_bytes)}` : "不限";
     const exp = n.expires_at || "—";
-    return `<tr>
+    return `<tr data-id="${n.id}" draggable="true">
+      <td data-k="顺序" class="ord"><span class="grip" title="按住拖动，调整展示页卡片顺序">⠿</span>
+        <button class="mvbtn" onclick="moveNode('${n.id}',-1)" title="上移">↑</button>
+        <button class="mvbtn" onclick="moveNode('${n.id}',1)" title="下移">↓</button></td>
       <td data-k="节点"><b>${esc(n.alias || n.id)}</b>
         <div class="muted small">${esc(n.os_name || n.os_id || "")}</div></td>
       <td data-k="地区">${countryCell(n)}</td>
@@ -469,6 +488,83 @@ function renderRows() {
       </div></td>
     </tr>`;
   }).join("");
+  bindDrag();
+}
+
+/* ── 展示顺序（拖动 ⠿ 或 ↑↓，保存到中心） ── */
+let DRAG_ID = null, ORDER_DIRTY = false;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 1800);
+}
+function bindDrag() {
+  document.querySelectorAll("#rows tr").forEach(tr => {
+    tr.querySelectorAll(".grip").forEach(g => {
+      g.addEventListener("mousedown", () => { tr.dataset.dragok = "1"; });
+      g.addEventListener("touchstart", () => { tr.dataset.dragok = "1"; }, {passive: true});
+    });
+    tr.addEventListener("mouseup", () => { tr.dataset.dragok = ""; });
+    tr.addEventListener("dragstart", e => {
+      if (tr.dataset.dragok !== "1") { e.preventDefault(); return; }   // 只有按住手柄才能拖，避免误拖
+      DRAG_ID = tr.dataset.id;
+      tr.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", DRAG_ID); } catch (_) {}
+    });
+    tr.addEventListener("dragend", () => {
+      tr.classList.remove("dragging");
+      tr.dataset.dragok = "";
+      DRAG_ID = null;
+      document.querySelectorAll("#rows tr").forEach(x => x.classList.remove("drop-target"));
+    });
+    tr.addEventListener("dragover", e => {
+      if (!DRAG_ID || tr.dataset.id === DRAG_ID) return;
+      e.preventDefault();
+      tr.classList.add("drop-target");
+    });
+    tr.addEventListener("dragleave", () => tr.classList.remove("drop-target"));
+    tr.addEventListener("drop", e => {
+      e.preventDefault();
+      tr.classList.remove("drop-target");
+      if (!DRAG_ID || DRAG_ID === tr.dataset.id) return;
+      const from = NODES.findIndex(n => n.id === DRAG_ID);
+      const to = NODES.findIndex(n => n.id === tr.dataset.id);
+      if (from < 0 || to < 0) return;
+      const [moved] = NODES.splice(from, 1);
+      NODES.splice(to, 0, moved);
+      renderRows();
+      saveOrder();
+    });
+  });
+}
+function moveNode(id, delta) {
+  const i = NODES.findIndex(n => n.id === id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= NODES.length) return;
+  const [moved] = NODES.splice(i, 1);
+  NODES.splice(j, 0, moved);
+  renderRows();
+  saveOrder();
+}
+async function saveOrder() {
+  const ids = NODES.map(n => n.id);
+  try {
+    const r = await API("/api/nodes/order", {method: "POST", body: JSON.stringify({ids})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.error || "顺序没保存上，已恢复"); await load(); return; }
+    toast("顺序已保存，展示页立即生效");
+  } catch (e) {
+    toast("顺序没保存上：" + e);
+    await load();
+  }
+}
+async function resetOrder() {
+  NODES.sort((a, b) => (a.created || 0) - (b.created || 0));
+  renderRows();
+  await saveOrder();
 }
 
 /* ── 弹窗通用 ── */

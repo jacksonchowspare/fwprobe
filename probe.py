@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.18"
+VERSION = "0.5.19"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     target_ver  TEXT DEFAULT '',      -- 升级目标版本，agent 升到后清空
     pending_uninstall INTEGER DEFAULT 0,  -- 中心点了「卸载探针」，等 agent 下次上报执行
     src         TEXT DEFAULT '',      -- 外部面板的节点 id（面板卸载时用它精确匹配）
+    sort_order  INTEGER DEFAULT 0,    -- 展示页卡片顺序（后台拖动调整，小在前）
     note        TEXT DEFAULT '',
     enabled     INTEGER DEFAULT 1,
     created     INTEGER DEFAULT 0,
@@ -408,11 +409,15 @@ class Store:
         tok = new_token()
         glist = [g.strip() for g in (groups if groups is not None else ([grp] if grp else [])) if g and g.strip()]
         with self.lock:
+            # 新节点排到展示页最后（老数据 sort_order 为 0 时也能排到最前，不会插队打乱已设顺序）
+            r = self.conn.execute("SELECT MAX(sort_order) mx FROM nodes").fetchone()
+            order = int((r["mx"] if r and r["mx"] is not None else 0) or 0) + 10
             self.conn.execute(
-                "INSERT INTO nodes(id,alias,grp,groups,tags,token_hash,quota_bytes,expires_at,note,created)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO nodes(id,alias,grp,groups,tags,token_hash,quota_bytes,expires_at,note,"
+                "sort_order,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (nid, alias, (glist[0] if glist else ""), dump_groups(glist), dump_tags(tags),
-                 sha256_hex(tok), int(quota_bytes or 0), expires_at or "", note or "", int(time.time())))
+                 sha256_hex(tok), int(quota_bytes or 0), expires_at or "", note or "",
+                 order, int(time.time())))
             self.conn.commit()
         return nid, tok
 
@@ -456,12 +461,44 @@ class Store:
         if "country_ts" not in cols:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN country_ts INTEGER DEFAULT 0")
             self.conn.commit()
+        if "sort_order" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN sort_order INTEGER DEFAULT 0")
+            self.conn.commit()
+            # 老库按创建时间回填，升级前后顺序看起来一致（不改变用户已有观感）
+            for i, r in enumerate(self.conn.execute(
+                    "SELECT id FROM nodes ORDER BY created").fetchall()):
+                self.conn.execute("UPDATE nodes SET sort_order=? WHERE id=?", (i * 10, r["id"]))
+            self.conn.commit()
         self.conn.execute("UPDATE nodes SET country='UK' WHERE UPPER(country)='GB'")
         self.conn.commit()
 
     def nodes(self):
         with self.lock:
-            return [dict(r) for r in self.conn.execute("SELECT * FROM nodes ORDER BY created")]
+            return [dict(r) for r in self.conn.execute(
+                "SELECT * FROM nodes ORDER BY sort_order, created")]
+
+    def reorder(self, ids):
+        """按给定 id 顺序重排公开页卡片（sort_order = 下标×10，留空隙方便以后插队）。"""
+        seen, clean = set(), []
+        for nid in ids or []:
+            nid = str(nid or "").strip()
+            if nid and nid not in seen:
+                seen.add(nid)
+                clean.append(nid)
+        if not clean:
+            return 0
+        n = 0
+        with self.lock:
+            for i, nid in enumerate(clean):
+                cur = self.conn.execute("UPDATE nodes SET sort_order=? WHERE id=?", (i * 10, nid))
+                n += 1 if cur.rowcount else 0
+            self.conn.commit()
+        return n
+
+    def next_sort_order(self):
+        with self.lock:
+            r = self.conn.execute("SELECT MAX(sort_order) mx FROM nodes").fetchone()
+        return int((r["mx"] if r and r["mx"] is not None else 0) or 0) + 10
 
     def node(self, nid):
         with self.lock:
@@ -1313,6 +1350,14 @@ class Handler(BaseHTTPRequestHandler):
             if not self._csrf_ok():
                 return self._send(403, {"error": "缺少 X-IPROBE 头"})
             rest = path[len("/api/nodes/"):].strip("/")
+            if rest == "order":                        # 展示页卡片顺序（后台拖动后保存）
+                data = self._json_body() or {}
+                ids = data.get("ids")
+                if not isinstance(ids, list):
+                    return self._send(400, {"error": "ids 必须是节点 id 数组"})
+                n = self.store.reorder(ids)
+                self.store.audit("node_order", "", f"重排 {n} 台", self._peer_ip())
+                return self._send(200, {"ok": True, "count": n})
             if rest == "country-refresh-all":          # 所有还没有地区的节点立即重新识别
                 updated, failed = [], []
                 for n in self.store.nodes():

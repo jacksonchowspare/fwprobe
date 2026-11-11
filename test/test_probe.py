@@ -405,6 +405,76 @@ class TestConfigHotReload(unittest.TestCase):
             P.CONFIG_PATH = orig
 
 
+class TestOrdering(unittest.TestCase):
+    """展示页卡片顺序（v0.5.19）：后台拖动 → nodes.sort_order → 公开页按序渲染"""
+
+    def setUp(self):
+        self.st, self.dir = mk_store()
+
+    def test_new_nodes_append_in_creation_order(self):
+        a, _ = self.st.add_node("A")
+        b, _ = self.st.add_node("B")
+        c, _ = self.st.add_node("C")
+        self.assertEqual([n["id"] for n in self.st.nodes()], [a, b, c])
+
+    def test_reorder_changes_public_order(self):
+        a, _ = self.st.add_node("A")
+        b, _ = self.st.add_node("B")
+        c, _ = self.st.add_node("C")
+        self.assertEqual(self.st.reorder([c, a, b]), 3)
+        self.assertEqual([n["alias"] for n in self.st.nodes()], ["C", "A", "B"])
+        self.assertEqual([n["alias"] for n in P.public_summary(self.st)["nodes"]], ["C", "A", "B"])
+
+    def test_reorder_ignores_unknown_and_duplicates(self):
+        a, _ = self.st.add_node("A")
+        b, _ = self.st.add_node("B")
+        self.assertEqual(self.st.reorder([a, a, "nope", b]), 2)
+        self.assertEqual([n["alias"] for n in self.st.nodes()], ["A", "B"])
+
+    def test_reorder_empty_is_noop(self):
+        self.st.add_node("A")
+        self.assertEqual(self.st.reorder([]), 0)
+        self.assertEqual([n["alias"] for n in self.st.nodes()], ["A"])
+
+    def test_new_node_after_custom_order_goes_last(self):
+        a, _ = self.st.add_node("A")
+        b, _ = self.st.add_node("B")
+        self.st.reorder([b, a])
+        self.st.add_node("C")
+        self.assertEqual([n["alias"] for n in self.st.nodes()], ["B", "A", "C"])
+
+    def test_order_via_http(self):
+        st, d = mk_store()
+        cfg = {"admin_token": "admin-test"}
+        srv = P.Server(("127.0.0.1", 0), P.Handler, st, cfg)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        try:
+            a, _ = st.add_node("A")
+            b, _ = st.add_node("B")
+
+            def post(body):
+                req = urllib.request.Request(base + "/api/nodes/order", data=json.dumps(body).encode(),
+                                             method="POST",
+                                             headers={"Content-Type": "application/json",
+                                                      "X-IPROBE": "1", "Authorization": "Bearer admin-test"})
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        return r.status, r.read().decode()
+                except urllib.error.HTTPError as e:
+                    return e.code, e.read().decode()
+
+            code, body = post({"ids": [b, a]})
+            self.assertEqual(code, 200, body)
+            self.assertEqual([n["alias"] for n in st.nodes()], ["B", "A"])
+            code, body = post({"ids": "nope"})
+            self.assertEqual(code, 400, body)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 class TestAdminPage(unittest.TestCase):
     """后台静态页自检：地区选择器与地区列必须真的在位（v0.5.18）"""
 
@@ -415,6 +485,11 @@ class TestAdminPage(unittest.TestCase):
     def test_country_picker_present(self):
         for token in ('id="ed_country_pop"', "function pickCountry", "function renderPick",
                       "const COUNTRIES", 'id="cc_all"', "function countryCell"):
+            self.assertIn(token, self.src)
+
+    def test_order_ui_present(self):
+        for token in ('class="grip"', "function bindDrag", "function saveOrder",
+                      "/api/nodes/order", "function resetOrder", "恢复默认顺序"):
             self.assertIn(token, self.src)
 
     def test_country_column_present(self):
