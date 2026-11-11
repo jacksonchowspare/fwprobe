@@ -709,6 +709,21 @@ class TestTargetAliases(unittest.TestCase):
         self.st.ingest(self.node, p, "1.1.1.1")
         self.assertEqual(self._orphans(), ["电信·北京"])
 
+    def test_alias_merge_survives_same_second_collision(self):
+        """同一台机器同一秒新旧名字都有行：主键会撞，改名不能报错，只能留一条"""
+        now = int(time.time())
+        for table in ("checks", "checks_min"):
+            for nm, avg in (("上海电信", 30.0), ("电信·上海", 45.0)):
+                self.st.conn.execute(
+                    f"INSERT OR REPLACE INTO {table}(node_id,ts,name,ok,loss,ravg)"
+                    f" VALUES(?,?,?,?,?,?)", (self.nid, now, nm, 1, 0.0, avg))
+        self.st.conn.commit()
+        self.assertTrue(self.st.record_alias("上海电信", "电信·上海"))
+        self.assertEqual(self._orphans(), ["电信·上海"])
+        with self.st.lock:
+            n = self.st.conn.execute("SELECT COUNT(*) c FROM checks_min").fetchone()["c"]
+        self.assertEqual(n, 1)
+
     def test_guess_alias_ignores_custom_names(self):
         tg = self.st.targets()
         self.assertIsNone(P.guess_target_alias("我的线路A", tg))

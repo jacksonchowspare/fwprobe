@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.32"
+VERSION = "0.5.33"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -732,6 +732,12 @@ class Store:
                               (old, name, int(time.time())))
             self.conn.execute("UPDATE aliases SET name=? WHERE name=?", (name, old))  # 链式改名
             for table in ("checks", "checks_min"):
+                # ⚠ 不能直接 UPDATE：同一台机器同一秒可能新旧两个名字都有行，
+                #    主键是 (node_id,ts,name)，改名会撞唯一约束。先删重复行再改名。
+                self.conn.execute(
+                    f"DELETE FROM {table} WHERE name=? AND EXISTS ("
+                    f" SELECT 1 FROM {table} x WHERE x.node_id={table}.node_id"
+                    f" AND x.ts={table}.ts AND x.name=?)", (old, name))
                 self.conn.execute(f"UPDATE {table} SET name=? WHERE name=?", (name, old))
             self.conn.commit()
         return True
