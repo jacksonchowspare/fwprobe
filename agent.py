@@ -40,7 +40,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.10"
+VERSION = "0.5.11"
 CONFIG_PATH = os.environ.get("FWPROBE_AGENT_CONFIG", "/etc/fwprobe-agent/config.json")
 SPOOL_DIR = os.environ.get("FWPROBE_AGENT_SPOOL", "/var/lib/fwprobe-agent/spool")
 SPOOL_MAX = 200
@@ -55,6 +55,54 @@ DEFAULT_TARGETS = [
     {"name": "上海联通v6", "proto": "tcp", "host": "sh-cu-v6.ip.zstaticcdn.com", "port": 80, "family": "6", "enabled": False},
     {"name": "上海移动v6", "proto": "tcp", "host": "sh-cm-v6.ip.zstaticcdn.com", "port": 80, "family": "6", "enabled": False},
 ]
+
+
+def targets_signature(targets):
+    """目标列表指纹：中心与 agent 必须逐字一致（enabled 归一成 bool，否则 1/True 会算出不同指纹）。"""
+    rows = [{"name": str(t.get("name") or ""), "host": str(t.get("host") or ""),
+             "port": int(t.get("port") or 80), "proto": str(t.get("proto") or "tcp"),
+             "family": str(t.get("family") or "auto"), "enabled": bool(t.get("enabled", True))}
+            for t in (targets or [])]
+    raw = json.dumps(rows, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def apply_targets(cfg, spec):
+    """应用中心下发的三网目标：原子写本地 config.json，立即生效（不重启服务）。"""
+    items = (spec or {}).get("list") or []
+    clean = []
+    for t in items:
+        if not isinstance(t, dict):
+            continue
+        host = str(t.get("host") or "").strip()
+        if not host:
+            continue
+        proto = "icmp" if str(t.get("proto") or "").lower() == "icmp" else "tcp"
+        try:
+            port = int(t.get("port") or 80)
+        except (TypeError, ValueError):
+            port = 80
+        family = str(t.get("family") or "auto").lower()
+        clean.append({"name": str(t.get("name") or host)[:32], "host": host, "port": port,
+                      "proto": proto, "family": family if family in ("auto", "4", "6") else "auto",
+                      "enabled": bool(t.get("enabled", True))})
+    if not clean:
+        return False
+    path = cfg.get("_path") or CONFIG_PATH
+    out = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
+    out["targets"] = clean
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(out, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[targets] 写配置失败：{exc}", file=sys.stderr, flush=True)
+        return False
+    cfg["targets"] = clean
+    print("[targets] 已应用中心下发的目标：" +
+          ", ".join(f"{t['name']}({t['proto']})" for t in clean), flush=True)
+    return True
 
 
 # --------------------------------------------------------------------------- 配置
@@ -519,6 +567,7 @@ class Sampler:
             self.last_checks_ts = now
         payload["checks"] = self.last_checks or []
         payload["checks_ts"] = int(self.last_checks_ts) if self.last_checks else 0
+        payload["targets_ver"] = targets_signature(self.cfg.get("targets"))
         return payload
 
 
@@ -685,6 +734,9 @@ def handle_report_response(cfg, body):
         sys.exit(0)
     if isinstance(data.get("upgrade"), dict):
         perform_upgrade(cfg, data["upgrade"])
+    if isinstance(data.get("targets"), dict):
+        return apply_targets(cfg, data["targets"])
+    return False
 
 
 # --------------------------------------------------------------------------- 主循环
@@ -696,6 +748,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
+    cfg["_path"] = args.config
     if not cfg.get("token"):
         # 没配 token 时也允许本地采样（方便调试），只是不上报
         pass
@@ -725,7 +778,8 @@ def main(argv=None):
             payload = sampler.sample()
             try:
                 body = post_report(cfg, payload)
-                handle_report_response(cfg, body)
+                if handle_report_response(cfg, body):
+                    sampler.last_checks = None      # 目标已更新，下一轮立刻按新目标探测
                 spool_flush(cfg)
             except Exception as exc:
                 print(f"[warn] 上报失败（已入本地缓存）: {exc}", file=sys.stderr)

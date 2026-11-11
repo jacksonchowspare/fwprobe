@@ -475,13 +475,13 @@ function card(n) {
   const three = n.three || {targets: {}};
   const carriers = (n.checks || []).map(c => {
     const t = (three.targets || {})[c.name] || {};
-    return { name: c.name,
+    return { name: c.name, op: t.op || "", order: t.order == null ? 99 : t.order,
              ms: t.avg_latency == null ? null : t.avg_latency,
              loss: t.avg_loss == null ? null : t.avg_loss,
              b: t.buckets || [] };
-  });
+  }).sort((a, b) => a.order - b.order);        // 按后台设的目标顺序排，别跟着接口返回顺序变
   const rowHead = (c, val) => {
-    const col = carrierColor(c.name);
+    const col = carrierColor(c.op || c.name);
     return `<div class="trow-h">
       <span class="name"><i class="cd" style="background:${col};box-shadow:0 0 0 2px ${col}2e"></i><span class="nm">${esc(c.name)}</span></span>
       <b class="v ${val.cls}">${val.text}</b></div>`;
@@ -905,7 +905,8 @@ function carrierColor(name) {
   if (/电信|telecom|ctcc|cn2/i.test(name)) return "#34d399";   // 绿
   if (/移动|mobile|cmcc|cmin2/i.test(name)) return "#fbbf24";  // 黄
   if (/联通|unicom|cucc/i.test(name)) return "#4da3ff";        // 蓝
-  const pal = ["#a78bfa", "#f472b6", "#22d3ee", "#fb923c"];
+  if (/广电|broadcom|cbn/i.test(name)) return "#f472b6";       // 粉
+  const pal = ["#a78bfa", "#22d3ee", "#fb923c"];
   return pal[Math.abs(name.length) % pal.length];
 }
 

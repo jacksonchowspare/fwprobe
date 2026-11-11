@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
 import sys
 import threading
@@ -36,7 +37,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.20"
+VERSION = "0.5.21"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +76,19 @@ CREATE TABLE IF NOT EXISTS nodes (
     enabled     INTEGER DEFAULT 1,
     created     INTEGER DEFAULT 0,
     last_seen   INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS targets (          -- 三网探测目标（中心统一管理，下发到 agent）
+    id         TEXT PRIMARY KEY,
+    op         TEXT DEFAULT '',    -- 运营商：电信 / 联通 / 移动 / 广电…
+    region     TEXT DEFAULT '',    -- 地区：上海 / 香港 / 洛杉矶…
+    name       TEXT NOT NULL,      -- 展示名 = op·region（同时是历史数据的分组键）
+    host       TEXT NOT NULL,
+    port       INTEGER DEFAULT 80,
+    proto      TEXT DEFAULT 'tcp', -- tcp | icmp
+    family     TEXT DEFAULT 'auto',-- auto | 4 | 6
+    enabled    INTEGER DEFAULT 1,
+    sort_order INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS samples (
@@ -182,6 +196,71 @@ def _cfg_mtime():
         return os.path.getmtime(CONFIG_PATH)
     except OSError:
         return 0
+
+
+# --------------------------------------------------------------------------- 三网目标
+# 默认还是上海三网（v4 启用，v6 留着但关闭）。op/region 分开存，展示名拼成「电信·上海」。
+DEFAULT_TARGETS = [
+    {"id": "ct4", "op": "电信", "region": "上海", "host": "sh-ct-v4.ip.zstaticcdn.com",
+     "port": 80, "proto": "tcp", "family": "auto", "enabled": 1},
+    {"id": "cu4", "op": "联通", "region": "上海", "host": "sh-cu-v4.ip.zstaticcdn.com",
+     "port": 80, "proto": "tcp", "family": "auto", "enabled": 1},
+    {"id": "cm4", "op": "移动", "region": "上海", "host": "sh-cm-v4.ip.zstaticcdn.com",
+     "port": 80, "proto": "tcp", "family": "auto", "enabled": 1},
+    {"id": "ct6", "op": "电信", "region": "上海v6", "host": "sh-ct-v6.ip.zstaticcdn.com",
+     "port": 80, "proto": "tcp", "family": "6", "enabled": 0},
+    {"id": "cu6", "op": "联通", "region": "上海v6", "host": "sh-cu-v6.ip.zstaticcdn.com",
+     "port": 80, "proto": "tcp", "family": "6", "enabled": 0},
+    {"id": "cm6", "op": "移动", "region": "上海v6", "host": "sh-cm-v6.ip.zstaticcdn.com",
+     "port": 80, "proto": "tcp", "family": "6", "enabled": 0},
+]
+TARGET_MAX = 6
+
+
+def target_name(op, region):
+    op, region = (op or "").strip(), (region or "").strip()
+    return f"{op}·{region}" if (op and region) else (op or region)
+
+
+def clean_target(t, idx=0):
+    """校验并归一一条三网目标；非法直接抛 ValueError（中文原因，后台原样显示）。"""
+    if not isinstance(t, dict):
+        raise ValueError("目标格式不对")
+    host = str(t.get("host") or "").strip()
+    if not host:
+        raise ValueError("主机不能为空")
+    if len(host) > 120 or any(ch.isspace() for ch in host):
+        raise ValueError(f"主机不合法：{host}")
+    proto = str(t.get("proto") or "tcp").strip().lower()
+    if proto not in ("tcp", "icmp"):
+        raise ValueError("协议只能是 tcp 或 icmp")
+    family = str(t.get("family") or "auto").strip().lower()
+    family = "4" if family in ("4", "ipv4") else "6" if family in ("6", "ipv6") else "auto"
+    try:
+        port = int(t.get("port") or 80)
+    except (TypeError, ValueError):
+        raise ValueError("端口必须是数字")
+    if proto == "tcp" and not 1 <= port <= 65535:
+        raise ValueError("端口要在 1–65535 之间")
+    op = str(t.get("op") or "").strip()[:12]
+    region = str(t.get("region") or "").strip()[:12]
+    # 展示名一律由 运营商·地区 拼出来（改了地区卡片上就跟着变）；两者都空才退回 name / host
+    name = (target_name(op, region) or str(t.get("name") or "").strip() or host)[:32]
+    return {"id": (str(t.get("id") or "").strip()[:16] or secrets.token_hex(4)),
+            "op": op, "region": region, "name": name, "host": host,
+            "port": 80 if proto == "icmp" else port, "proto": proto, "family": family,
+            "enabled": 1 if t.get("enabled", True) else 0,
+            "sort_order": int(t.get("sort_order") if t.get("sort_order") is not None else idx * 10)}
+
+
+def targets_signature(items):
+    """目标列表指纹：中心与 agent 必须逐字一致（enabled 归一成 bool，否则 1/True 会算出不同指纹）。"""
+    rows = [{"name": str(t.get("name") or ""), "host": str(t.get("host") or ""),
+             "port": int(t.get("port") or 80), "proto": str(t.get("proto") or "tcp"),
+             "family": str(t.get("family") or "auto"), "enabled": bool(t.get("enabled", True))}
+            for t in (items or [])]
+    raw = json.dumps(rows, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------- 存储
@@ -471,6 +550,7 @@ class Store:
             self.conn.commit()
         self.conn.execute("UPDATE nodes SET country='UK' WHERE UPPER(country)='GB'")
         self.conn.commit()
+        self.seed_targets()
 
     def nodes(self):
         with self.lock:
@@ -499,6 +579,58 @@ class Store:
         with self.lock:
             r = self.conn.execute("SELECT MAX(sort_order) mx FROM nodes").fetchone()
         return int((r["mx"] if r and r["mx"] is not None else 0) or 0) + 10
+
+    # -- 三网目标 -----------------------------------------------------------
+    def targets(self):
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT * FROM targets ORDER BY sort_order, id")]
+
+    def targets_ver(self):
+        return targets_signature(self.targets())
+
+    def seed_targets(self):
+        """首次启动写入默认三网目标（已有数据则不动）。"""
+        with self.lock:
+            if self.conn.execute("SELECT 1 FROM targets LIMIT 1").fetchone():
+                return 0
+            for i, t in enumerate(DEFAULT_TARGETS):
+                c = clean_target(dict(t), i)
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO targets(id,op,region,name,host,port,proto,family,"
+                    "enabled,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (c["id"], c["op"], c["region"], c["name"], c["host"], c["port"],
+                     c["proto"], c["family"], c["enabled"], c["sort_order"]))
+            self.conn.commit()
+        return len(DEFAULT_TARGETS)
+
+    def save_targets(self, items, rename_history=True):
+        """整表替换目标；改名时可选把历史数据一起改名（否则那一路的 1 小时窗口会重新积累）。"""
+        clean = [clean_target(t, i) for i, t in enumerate(items or [])]
+        if not clean:
+            raise ValueError("至少要保留一条目标")
+        if len(clean) > TARGET_MAX:
+            raise ValueError(f"最多 {TARGET_MAX} 条目标")
+        renamed = []
+        with self.lock:
+            old = {r["id"]: r["name"] for r in self.conn.execute("SELECT id,name FROM targets")}
+            self.conn.execute("DELETE FROM targets")
+            for t in clean:
+                self.conn.execute(
+                    "INSERT INTO targets(id,op,region,name,host,port,proto,family,enabled,sort_order)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (t["id"], t["op"], t["region"], t["name"], t["host"], t["port"], t["proto"],
+                     t["family"], t["enabled"], t["sort_order"]))
+            if rename_history:
+                for t in clean:
+                    old_name = old.get(t["id"])
+                    if old_name and old_name != t["name"]:
+                        for table in ("checks", "checks_min"):
+                            self.conn.execute(f"UPDATE {table} SET name=? WHERE name=?",
+                                              (t["name"], old_name))
+                        renamed.append([old_name, t["name"]])
+            self.conn.commit()
+        return self.targets_ver(), renamed
 
     def node(self, nid):
         with self.lock:
@@ -959,16 +1091,67 @@ def is_private_ip(ip: str) -> bool:
         return True
 
 
+def resolve_host(host, timeout=3.0):
+    """解析主机名 → IP 列表（带硬超时：getaddrinfo 卡住会拖死后台请求）。"""
+    box = {}
+
+    def work():
+        try:
+            ips = []
+            for _, _, _, _, sockaddr in socket.getaddrinfo(host, None):
+                ip = sockaddr[0]
+                if ip not in ips:
+                    ips.append(ip)
+            box["ips"] = ips
+        except Exception as exc:
+            box["err"] = type(exc).__name__
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout)
+    if "ips" in box:
+        return box["ips"], ""
+    return [], box.get("err") or "解析超时"
+
+
+def geoip_city(ip, timeout=5):
+    """城市级归属地（ip-api 中文优先，ipinfo 兜底）。CDN 多 IP 时只是个参考值，不保证是你要的那个城市。"""
+    urls = (f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,city&lang=zh-CN",
+            f"https://ipinfo.io/{ip}/json")
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                obj = json.loads(r.read().decode("utf-8", "replace") or "{}")
+            if obj.get("status") == "fail":
+                continue
+            city = (obj.get("city") or "").split(",")[0].strip()
+            cc = norm_country(obj.get("countryCode") or obj.get("country") or "")
+            if city or cc:
+                return {"ip": ip, "city": city, "country": cc}
+        except Exception:
+            continue
+    return {"ip": ip, "city": "", "country": ""}
+
+
 def public_summary(store: Store):
     """公开页数据：不含 IP、不含 token、不含内网信息。"""
     out = []
     now = int(time.time())
+    # 三网目标：给每一路补上运营商与排序（前端按顺序画、按运营商配色，改名后颜色不会乱）
+    tlist = store.targets()
+    opmap = {t["name"]: (t.get("op") or "", i) for i, t in enumerate(tlist)}
     for n in store.nodes():
         if not n.get("enabled"):
             continue
         s, checks = store.latest(n["id"])
         online = bool(n.get("last_seen")) and (now - int(n["last_seen"]) < OFFLINE_AFTER)
         rx, tx = store.totals(n["id"])
+        three = store.three(n["id"])
+        for tname, tdata in (three.get("targets") or {}).items():
+            op, order = opmap.get(tname, ("", 99))
+            tdata["op"] = op
+            tdata["order"] = order
         out.append({
             "id": n["id"], "alias": n["alias"],
             "group": n.get("grp", ""),
@@ -986,7 +1169,7 @@ def public_summary(store: Store):
             "used_bytes": rx + tx,
             "rx_total": rx, "tx_total": tx,
             "spark": store.spark(n["id"], 24),
-            "three": store.three(n["id"]),        # 1 小时 / 20 格（每格 3 分钟），Komari 主题口径
+            "three": three,                        # 1 小时 / 20 格（每格 3 分钟），Komari 主题口径
             "sample": s, "checks": checks,
         })
     return {"version": VERSION, "now": now, "offline_after": OFFLINE_AFTER, "nodes": out}
@@ -1088,6 +1271,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
             return self._send(200, {"items": self.store.audit_list(200)})
+        if path == "/api/admin/targets":
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            return self._send(200, {"items": self.store.targets(), "ver": self.store.targets_ver()})
         if path == "/api/admin/groups":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
@@ -1211,6 +1398,35 @@ class Handler(BaseHTTPRequestHandler):
                 done.append(n["alias"] or n["id"])
             self.store.audit("agent_upgrade_batch", f"{len(done)} 台", f"→ {meta_ver}", self._peer_ip())
             return self._send(200, {"ok": True, "target": meta_ver, "queued": done})
+        if path == "/api/admin/targets":              # 三网目标：保存并下发
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
+            data = self._json_body() or {}
+            try:
+                ver, renamed = self.store.save_targets(
+                    data.get("items") or [], bool(data.get("rename_history", True)))
+            except ValueError as exc:
+                return self._send(400, {"error": str(exc)})
+            self.store.audit("targets_update", "", f"{len(data.get('items') or [])} 条 → {ver}",
+                             self._peer_ip())
+            return self._send(200, {"ok": True, "ver": ver, "renamed": renamed})
+        if path == "/api/admin/targets/geoip":        # 解析目标 → IP / 城市（给「地区」做初值）
+            if not self._admin_ok():
+                return self._send(401, {"error": "未授权"})
+            if not self._csrf_ok():
+                return self._send(403, {"error": "缺少 X-IPROBE 头"})
+            data = self._json_body() or {}
+            host = str(data.get("host") or "").strip()
+            if not host:
+                return self._send(400, {"error": "host 必填"})
+            ips, err = resolve_host(host)
+            if not ips:
+                return self._send(400, {"error": f"解析失败：{err}"})
+            geo = geoip_city(ips[0])
+            return self._send(200, {"ok": True, "ips": ips[:5], "ip": geo["ip"],
+                                    "city": geo["city"], "country": geo["country"]})
         if path == "/api/admin/meta":
             if not self._admin_ok():
                 return self._send(401, {"error": "未授权"})
@@ -1266,6 +1482,15 @@ class Handler(BaseHTTPRequestHandler):
                 resp["upgrade"] = {"version": meta_ver,
                                    "url": base + "/agent.py",
                                    "sha256": meta_sha}
+            # 三网目标下发：只有 0.5.11+ 的 agent 会在上报里带 targets_ver，老 agent 保持本地配置
+            if "targets_ver" in payload:
+                tver = self.store.targets_ver()
+                if str(payload.get("targets_ver") or "") != tver:
+                    tl = self.store.targets()
+                    if tl:
+                        resp["targets"] = {"ver": tver, "list": [
+                            {k: t.get(k) for k in ("name", "host", "port", "proto", "family", "enabled")}
+                            for t in tl]}
             return self._send(200, resp)
         if path == "/api/provision/nodes":
             return self._provision_nodes()

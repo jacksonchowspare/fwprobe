@@ -405,6 +405,94 @@ class TestConfigHotReload(unittest.TestCase):
             P.CONFIG_PATH = orig
 
 
+class TestThreeTargets(unittest.TestCase):
+    """三网目标（v0.5.21）：中心统一管理 + 下发 agent"""
+
+    def setUp(self):
+        self.st, self.dir = mk_store()
+
+    def test_seed_defaults(self):
+        ts = self.st.targets()
+        self.assertEqual([t["name"] for t in ts],
+                         ["电信·上海", "联通·上海", "移动·上海",
+                          "电信·上海v6", "联通·上海v6", "移动·上海v6"])
+        self.assertEqual(sum(t["enabled"] for t in ts), 3)      # 只有 v4 三条默认启用
+        self.assertEqual(ts[0]["proto"], "tcp")
+
+    def test_name_composed_from_op_and_region(self):
+        self.st.save_targets([
+            {"id": "x", "op": "广电", "region": "北京", "host": "1.1.1.1", "proto": "icmp"},
+            {"id": "y", "op": "电信", "region": "", "host": "2.2.2.2", "proto": "tcp", "port": 443},
+        ])
+        ts = self.st.targets()
+        self.assertEqual([t["name"] for t in ts], ["广电·北京", "电信"])
+        self.assertEqual(ts[0]["proto"], "icmp")
+        self.assertEqual(ts[1]["port"], 443)
+
+    def test_invalid_items_rejected(self):
+        for bad in ([], [{"host": ""}], [{"host": "a b"}], [{"host": "x", "proto": "udp"}],
+                    [{"host": "x", "port": 99999}], [{"host": f"h{i}.example"} for i in range(7)]):
+            with self.assertRaises(ValueError):
+                self.st.save_targets(bad)
+        self.assertEqual(len(self.st.targets()), 6)            # 拒绝后不能动原有数据
+
+    def test_version_tracks_content(self):
+        v1 = self.st.targets_ver()
+        self.st.save_targets([{"host": "1.1.1.1", "op": "电信", "region": "上海"}])
+        v2 = self.st.targets_ver()
+        self.assertNotEqual(v1, v2)
+        self.st.save_targets([{"host": "1.1.1.1", "op": "电信", "region": "上海"}])
+        self.assertEqual(v2, self.st.targets_ver())            # 内容没变 → 指纹不变，不会反复下发
+
+    def test_rename_history(self):
+        old = self.st.targets()[0]
+        self.st.conn.execute(
+            "INSERT INTO checks(node_id,ts,name,proto,host,port,family,ok,loss,rmin,ravg,rmax)"
+            " VALUES('n1',?,?,?,?,?,?,1,0,10,10,10)",
+            (int(time.time()), old["name"], "tcp", old["host"], 80, "4"))
+        self.st.conn.commit()
+        _, renamed = self.st.save_targets([dict(old, region="北京")], rename_history=True)
+        self.assertEqual(renamed, [[old["name"], "电信·北京"]])
+        row = self.st.conn.execute("SELECT COUNT(*) c FROM checks WHERE name='电信·北京'").fetchone()
+        self.assertEqual(row["c"], 1)
+
+
+class TestAgentTargets(unittest.TestCase):
+    """agent 侧：接收中心下发的目标，写回本地配置且指纹与中心一致"""
+
+    def test_apply_targets_writes_config(self):
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        cfg = {"server": "http://x", "token": "t", "targets": [], "_path": path}
+        ok = A.apply_targets(cfg, {"ver": "v", "list": [
+            {"name": "电信·上海", "host": "1.1.1.1", "port": 80, "proto": "tcp",
+             "family": "auto", "enabled": 1},
+            {"name": "广电·北京", "host": "2.2.2.2", "port": 80, "proto": "icmp",
+             "family": "4", "enabled": 0},
+        ]})
+        self.assertTrue(ok)
+        with open(path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual([t["name"] for t in saved["targets"]], ["电信·上海", "广电·北京"])
+        self.assertEqual(saved["targets"][1]["proto"], "icmp")
+        self.assertFalse(saved["targets"][1]["enabled"])
+        self.assertNotIn("_path", saved)                      # 内部字段不能写进配置文件
+        self.assertEqual(A.targets_signature(cfg["targets"]), P.targets_signature(saved["targets"]))
+
+    def test_apply_targets_ignores_empty(self):
+        cfg = {"token": "t", "_path": os.path.join(tempfile.mkdtemp(), "c.json")}
+        self.assertFalse(A.apply_targets(cfg, {"list": []}))
+        self.assertFalse(A.apply_targets(cfg, {}))
+
+    def test_payload_carries_targets_ver(self):
+        cfg = {"server": "", "token": "", "interval": 30, "check_interval": 60,
+               "targets": [{"name": "电信·上海", "host": "127.0.0.1", "port": 80, "proto": "tcp",
+                            "family": "auto", "enabled": True}]}
+        s = A.Sampler(cfg)
+        s.sample()
+        p = s.sample()
+        self.assertEqual(p.get("targets_ver"), P.targets_signature(cfg["targets"]))
+
+
 class TestOrdering(unittest.TestCase):
     """展示页卡片顺序（v0.5.19）：后台拖动 → nodes.sort_order → 公开页按序渲染"""
 
@@ -492,6 +580,11 @@ class TestAdminPage(unittest.TestCase):
                       "/api/nodes/order", "function resetOrder", "恢复默认顺序"):
             self.assertIn(token, self.src)
 
+    def test_targets_ui_present(self):
+        for token in ('id="m_targets"', "function openTargets", "function saveTargets",
+                      "/api/admin/targets", "function tgGeo", "三网目标"):
+            self.assertIn(token, self.src)
+
     def test_country_column_present(self):
         self.assertIn("<th>地区</th>", self.src)
         self.assertIn("countryCell(n)", self.src)
@@ -532,6 +625,24 @@ class TestHTTP(unittest.TestCase):
         self.assertEqual(code, 200, body)
         code, body = self._post("/api/admin/login", {"password": "wrong-one"}, csrf=False)
         self.assertEqual(code, 401, body)
+
+    def test_report_pushes_targets(self):
+        """0.5.11+ 的 agent 上报带 targets_ver：版本不一致就下发；一致/老 agent 不下发"""
+        code, body = self._post("/api/report", {"agent": "0.5.11", "ts": int(time.time()),
+                                                "targets_ver": "stale"}, token=self.tok)
+        d = json.loads(body)
+        self.assertIn("targets", d, body)
+        self.assertEqual(d["targets"]["ver"], self.st.targets_ver())
+        self.assertEqual([t["name"] for t in d["targets"]["list"]][:3],
+                         ["电信·上海", "联通·上海", "移动·上海"])
+        # 已同步：不再下发
+        code, body = self._post("/api/report", {"agent": "0.5.11", "ts": int(time.time()),
+                                                "targets_ver": d["targets"]["ver"]}, token=self.tok)
+        self.assertNotIn("targets", json.loads(body))
+        # 老 agent 不带 targets_ver：保持本地配置，不下发
+        code, body = self._post("/api/report", {"agent": "0.5.10", "ts": int(time.time())},
+                                token=self.tok)
+        self.assertNotIn("targets", json.loads(body))
 
     def tearDown(self):
         self.srv.shutdown()

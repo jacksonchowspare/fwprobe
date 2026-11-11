@@ -70,6 +70,18 @@
     background:rgba(20,26,36,.94);color:#e8eef8;border:1px solid var(--border);border-radius:10px;
     padding:8px 14px;font-size:12.5px;opacity:0;pointer-events:none;transition:.2s;z-index:40}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  /* 三网目标 */
+  .tghead,.tgrow{display:grid;grid-template-columns:32px 92px 82px minmax(170px,1.8fr) 58px 74px 60px 26px 24px;
+    gap:6px;align-items:start}
+  .tghead{font-size:11.5px;color:var(--muted);margin-bottom:6px}
+  .tgrow{margin-bottom:8px}
+  .tgrow input,.tgrow select{padding:5px 7px;font-size:12.5px}
+  .tgrow .tg-on{width:auto;justify-self:center;margin-top:9px}
+  .tgrow .tg-geo,.tgrow .tg-del{padding:4px 6px;font-size:12px;border-radius:7px}
+  .tgrow.off{opacity:.55}
+  .tgopt{margin-top:10px}
+  .ck{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);cursor:pointer}
+  .ck input{width:auto}
   /* 弹窗 */
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:none;
     align-items:flex-start;justify-content:center;z-index:20;overflow:auto;padding:6vh 16px}
@@ -124,6 +136,8 @@
     td::before{content:attr(data-k);color:var(--muted);font-size:12px;min-width:56px;flex:none}
     .ops{justify-content:flex-start}
     td[data-k="节点"] b,td[data-k="状态"],td[data-k="地区"],td[data-k="到期/配额"]{white-space:normal}
+    .tghead{display:none}
+    .tgrow{grid-template-columns:1fr 1fr;gap:6px;padding-bottom:10px;border-bottom:1px dashed var(--border)}
   }
 </style>
 </head>
@@ -163,6 +177,7 @@
         <button class="primary" onclick="openAdd()">+ 新增节点</button>
         <button onclick="load()">刷新</button>
         <button onclick="openGroups()">分组管理</button>
+        <button onclick="openTargets()">三网目标</button>
         <button onclick="openAudit()">操作日志</button>
         <button onclick="resetOrder()" title="按创建时间重新排（改乱了可以一键复位）">恢复默认顺序</button>
         <button class="primary" id="up_all" onclick="upgradeAll()" hidden></button>
@@ -240,6 +255,31 @@
       <button onclick="copyCmd()">复制命令</button>
       <button class="primary" onclick="closeMask('m_cmd')">我已保存</button>
     </div>
+  </div>
+</div>
+
+<!-- 三网目标 -->
+<div class="mask" id="m_targets">
+  <div class="dlg" style="max-width:840px">
+    <h2>三网目标</h2>
+    <div class="muted small" style="margin-bottom:10px">
+      保存后下发给所有节点（需要 agent ≥ 0.5.11），最多 60 秒内生效。勾掉「启用」= 这条不探测、卡片上也不显示。
+      主机可填域名或 IP；TCP 默认测 80 端口，ICMP 不需要端口（agent 以 root 跑才可用）。
+    </div>
+    <div class="tghead"><span>启用</span><span>运营商</span><span>地区</span><span>主机 / IP</span>
+      <span>端口</span><span>协议</span><span>族</span><span></span><span></span></div>
+    <div id="tg_rows"></div>
+    <div class="muted small" id="tg_preview" style="margin-top:8px"></div>
+    <div class="tgopt">
+      <label class="ck"><input type="checkbox" id="tg_rename" checked> 改名时把历史数据一起改名（不勾则那一路的 1 小时格子从空开始）</label>
+    </div>
+    <div class="dlgfoot">
+      <button onclick="addTargetRow()">+ 添加目标</button>
+      <span class="sp"></span>
+      <button onclick="closeMask('m_targets')">取消</button>
+      <button class="primary" onclick="saveTargets()">保存并下发</button>
+    </div>
+    <div class="muted small" id="tg_ver" style="margin-top:6px"></div>
   </div>
 </div>
 
@@ -553,6 +593,110 @@ async function resetOrder() {
   NODES.sort((a, b) => (a.created || 0) - (b.created || 0));
   renderRows();
   await saveOrder();
+}
+
+/* ── 三网目标 ── */
+let TG = [], TG_VER = "";
+const TG_OPS = ["电信", "联通", "移动", "广电"];
+function tgName(t) {
+  if (t.op && t.region) return `${t.op}·${t.region}`;
+  return t.op || t.region || t.host || "未命名";
+}
+async function openTargets() {
+  const r = await API("/api/admin/targets");
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(d.error || "读取三网目标失败"); return; }
+  TG = (d.items || []).map(t => Object.assign({}, t));
+  TG_VER = d.ver || "";
+  renderTargets();
+  openMask("m_targets");
+}
+function tgOpSelect(t) {
+  const known = TG_OPS.includes(t.op);
+  return TG_OPS.map(o => `<option value="${o}"${o === t.op ? " selected" : ""}>${o}</option>`).join("")
+    + `<option value="__custom"${known ? "" : " selected"}>自定义…</option>`;
+}
+function renderTargets() {
+  $("tg_rows").innerHTML = TG.map((t, i) => {
+    const custom = !TG_OPS.includes(t.op);
+    return `<div class="tgrow ${t.enabled ? "" : "off"}" data-i="${i}">
+      <input class="tg-on" type="checkbox"${t.enabled ? " checked" : ""} onchange="tgSet(${i},'enabled',this.checked)">
+      <span>
+        <select class="tg-op" onchange="tgOpPick(${i},this.value)">${tgOpSelect(t)}</select>
+        <input class="tg-opc" value="${custom ? esc(t.op || "") : ""}" placeholder="运营商"
+               style="margin-top:4px;${custom ? "" : "display:none"}" oninput="tgSet(${i},'op',this.value)">
+      </span>
+      <input class="tg-region" value="${esc(t.region || "")}" placeholder="上海" oninput="tgSet(${i},'region',this.value)">
+      <input class="tg-host" value="${esc(t.host || "")}" placeholder="域名或 IP" oninput="tgSet(${i},'host',this.value)">
+      <input class="tg-port" type="number" min="1" max="65535" value="${t.port || 80}"
+             ${t.proto === "icmp" ? "disabled" : ""} oninput="tgSet(${i},'port',this.value)">
+      <select class="tg-proto" onchange="tgSet(${i},'proto',this.value);renderTargets()">
+        <option value="tcp"${t.proto !== "icmp" ? " selected" : ""}>TCP</option>
+        <option value="icmp"${t.proto === "icmp" ? " selected" : ""}>ICMP</option>
+      </select>
+      <select class="tg-fam" onchange="tgSet(${i},'family',this.value)">
+        <option value="auto"${(t.family || "auto") === "auto" ? " selected" : ""}>auto</option>
+        <option value="4"${t.family === "4" ? " selected" : ""}>IPv4</option>
+        <option value="6"${t.family === "6" ? " selected" : ""}>IPv6</option>
+      </select>
+      <button class="tg-geo" title="解析主机并识别城市" onclick="tgGeo(${i})">🌐</button>
+      <button class="tg-del" title="删除这条" onclick="tgDel(${i})">✕</button>
+    </div>`;
+  }).join("");
+  const on = TG.filter(t => t.enabled);
+  $("tg_preview").textContent = "卡片上显示：" + (on.map(tgName).join(" / ") || "（没有启用的目标）");
+  $("tg_ver").textContent = TG_VER ? `当前版本 ${TG_VER}（改内容后这个值会变）` : "";
+}
+function tgSet(i, key, val) {
+  if (!TG[i]) return;
+  TG[i][key] = key === "enabled" ? !!val : String(val == null ? "" : val).trim();
+  if (key === "region" || key === "op" || key === "host") {
+    const on = TG.filter(t => t.enabled);
+    $("tg_preview").textContent = "卡片上显示：" + (on.map(tgName).join(" / ") || "（没有启用的目标）");
+  }
+}
+function tgOpPick(i, val) {
+  if (!TG[i]) return;
+  TG[i].op = val === "__custom" ? " " : val;      // 空格只是为了让「自定义」输入框露出来
+  renderTargets();
+}
+function tgDel(i) {
+  TG.splice(i, 1);
+  renderTargets();
+}
+function addTargetRow() {
+  if (TG.length >= 6) { alert("最多 6 条"); return; }
+  TG.push({op: "", region: "", host: "", port: 80, proto: "tcp", family: "auto", enabled: 1});
+  renderTargets();
+}
+async function tgGeo(i) {
+  const host = (TG[i].host || "").trim();
+  if (!host) { alert("先填主机名或 IP"); return; }
+  const r = await API("/api/admin/targets/geoip", {method: "POST", body: JSON.stringify({host})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "解析失败"); return; }
+  if (d.city && !(TG[i].region || "").trim()) { TG[i].region = d.city; renderTargets(); }
+  alert(`解析到 ${(d.ips || []).length} 个 IP：\n${(d.ips || []).join("\n")}\n\n城市识别：${d.city || "—"}` +
+        (d.city ? `\n（多 A 记录的 CDN 目标仅供参考，可手动改地区）` : ""));
+}
+async function saveTargets() {
+  const items = TG.map((t, i) => ({
+    id: t.id, op: (t.op || "").trim(), region: (t.region || "").trim(),
+    host: (t.host || "").trim(), port: Number(t.port || 80),
+    proto: t.proto || "tcp", family: t.family || "auto", enabled: t.enabled ? 1 : 0,
+    sort_order: i * 10
+  }));
+  const r = await API("/api/admin/targets", {method: "POST",
+    body: JSON.stringify({items, rename_history: $("tg_rename").checked})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || "保存失败"); return; }
+  TG_VER = d.ver || TG_VER;
+  closeMask("m_targets");
+  toast("已保存，各节点最多 60 秒内生效");
+  if ((d.renamed || []).length) {
+    toast("历史数据已改名：" + d.renamed.map(x => x.join("→")).join("，"));
+  }
+  await load();
 }
 
 /* ── 弹窗通用 ── */
