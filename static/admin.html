@@ -742,8 +742,9 @@ function edPreview() {
   const bits = [];
   if (qm) {
     const cb = cycleBounds(qm, qs || fmtDay(new Date()));
-    bits.push(`配额${UNIT_CN[qm]}：${fmtDay(cb.start)} → ${fmtDay(cb.end)} 00:00 重置` +
-              `（还有 ${Math.max(0, daysTo(cb.end))} 天）`);
+    // 区间按「起始日 → 结束日（含）」写，重置时刻单独标出来：10 号起按月 = 10 号 ~ 下月 9 号 24:00
+    bits.push(`配额${UNIT_CN[qm]}：${fmtDay(cb.start)} → ${fmtDay(addPeriod(cb.end, "day", -1))}` +
+              `（${fmtDay(cb.end)} 00:00 重置，还有 ${Math.max(0, daysTo(cb.end))} 天）`);
   } else {
     bits.push("配额不按周期切分，显示累计用量");
   }

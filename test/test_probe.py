@@ -535,6 +535,20 @@ class TestBillingPeriod(unittest.TestCase):
         self.assertEqual(P.local_date(en).isoformat(), "2027-11-11")
         self.assertEqual(P.cycle_bounds("", "2026-11-11", now), (0, 0))
 
+    def test_cycle_info_shows_last_day_inclusive(self):
+        """10 号起按月 = 10 号 00:00 ~ 下月 9 号 24:00：展示要给 9 号，重置日另标。"""
+        today = P.local_date()
+        st, _d = mk_store()
+        nid, _tok = st.add_node("周期展示")
+        st.update_node(nid, quota_mode="month", quota_start=today.isoformat())
+        ci = st.cycle_info(st.node(nid))
+        nxt = P.add_months(today, 1)
+        self.assertEqual(ci["start_date"], today.isoformat())
+        self.assertEqual(ci["end_date"], (nxt - datetime.timedelta(days=1)).isoformat())
+        self.assertEqual(ci["reset_date"], nxt.isoformat())
+        self.assertEqual(ci["reset_at"], nxt.isoformat() + " 00:00")
+        self.assertEqual(ci["days_left"], (nxt - today).days)
+
     def test_cycle_start_in_future(self):
         """起始日填了未来日期：第一个周期从那天才开始，不会把今天算进上一段"""
         st, en = P.cycle_bounds("month", "2027-01-11", self._ts(2026, 11, 20, 9))
@@ -591,17 +605,55 @@ class TestTrafficAccounting(unittest.TestCase):
         self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (8300, 8200))
 
     def test_cycle_rollover_archives(self):
-        self._report(0, 0)
+        self._report(100, 100)                 # 先立基线
         self.st.conn.execute("UPDATE nodes SET cyc_start=?,cyc_rx=?,cyc_tx=? WHERE id=?",
                              (int(time.time()) - 40 * 86400, 777, 888, self.nid))
         self.st.conn.commit()
-        self._report(100, 100)
+        self._report(150, 140)
         hist = self.st.conn.execute("SELECT * FROM traffic_hist WHERE node_id=?", (self.nid,)).fetchall()
         self.assertEqual(len(hist), 1)
         self.assertEqual((hist[0]["rx"], hist[0]["tx"]), (777, 888))
         n = self.st.node(self.nid)
-        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (100, 100))   # 新周期从 0 起
-        self.assertEqual(self.st.lifetime(self.nid), (877, 988))   # 归档 + 本期
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (50, 40))     # 新周期从 0 起
+        self.assertEqual(self.st.lifetime(self.nid), (827, 928))   # 归档 + 本期
+
+    def test_unknown_baseline_never_adds_whole_counter(self):
+        """基准写成 0（老库迁移的「未知」哨兵）时，绝不能拿 0 当上次读数。
+
+        曾经 d = rx_total - 0 = 整条网卡计数器 → 一台只有 12GB 用量的机器被记成 1.85TB。
+        """
+        self.st.conn.execute("UPDATE nodes SET last_rx_total=0,last_tx_total=0,cyc_rx=0,cyc_tx=0"
+                             " WHERE id=?", (self.nid,))
+        self.st.conn.commit()
+        self._report(512_000_000_000, 503_000_000_000)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (0, 0))
+        self.assertEqual(n["last_rx_total"], 512_000_000_000)
+        self._report(512_000_050_000, 503_000_040_000)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (50_000, 40_000))
+
+    def test_zero_reading_is_ignored_and_keeps_baseline(self):
+        """agent 读不到网卡会报 0/0：当次不入账，基准也不能被写成 0（否则下一条就炸）"""
+        self._report(1000, 2000)
+        self._report(5000, 9000)
+        self._report(0, 0)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (4000, 7000))
+        self.assertEqual((n["last_rx_total"], n["last_tx_total"]), (5000, 9000))
+        self._report(6000, 10000)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (5000, 8000))
+
+    def test_counter_delta_states(self):
+        self.assertIsNone(P.counter_delta(100, 0))       # 无效读数
+        self.assertIsNone(P.counter_delta(0, 0))
+        self.assertEqual(P.counter_delta(0, 500), 0)     # 未知基准：只立基线
+        self.assertEqual(P.counter_delta(-1, 500), 0)
+        self.assertEqual(P.counter_delta(None, 500), 0)
+        self.assertEqual(P.counter_delta(500, 900), 400) # 正常增量
+        self.assertEqual(P.counter_delta(900, 300), 300) # 重启归零
+        self.assertEqual(P.counter_delta(900, 900), 0)
 
     def test_defaults_switch_on(self):
         n = self.st.node(self.nid)
@@ -928,10 +980,11 @@ class TestHTTP(unittest.TestCase):
                             quota_start=P.local_date().isoformat(),
                             renew_mode="month", renew_start=P.local_date().isoformat())
         self.st.ingest(self.st.node(self.nid),
-                       {"ts": int(time.time()), "net": {"rx_total": 0, "tx_total": 0}}, "1.2.3.4")
+                       {"ts": int(time.time()), "net": {"rx_total": 1 * 1024 ** 3,
+                                                         "tx_total": 1 * 1024 ** 3}}, "1.2.3.4")
         self.st.ingest(self.st.node(self.nid),
-                       {"ts": int(time.time()), "net": {"rx_total": 5 * 1024 ** 3,
-                                                         "tx_total": 3 * 1024 ** 3}}, "1.2.3.4")
+                       {"ts": int(time.time()), "net": {"rx_total": 6 * 1024 ** 3,
+                                                         "tx_total": 4 * 1024 ** 3}}, "1.2.3.4")
         d = P.public_summary(self.st)
         n = [x for x in d["nodes"] if x["id"] == self.nid][0]
         self.assertEqual(n["used_bytes"], 8 * 1024 ** 3)

@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.35"
+VERSION = "0.5.36"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -990,13 +990,25 @@ class Store:
 
     def account_traffic(self, nid, rx_total, tx_total):
         """把 agent 的累计计数器换算成「本周期用量」。
-        - 计数器归零（重启后 rx_total 变小）按从 0 开始累加，不会出现负数；
-        - 跨周期时把上一段归档进 traffic_hist 再清零，长期不进后台也不会丢数。"""
+
+        本次读数无效（rx 与 tx 都是 0 = agent 读不到网卡）时整条不计，基准也不动。
+        其余按 counter_delta() 三态判断：
+        - 基准未知（-1/0/空）→ 本次不累加，只把当前读数立为基准；
+        - 计数器变小（新值 > 0）→ 重启归零，按从 0 起算；
+        - 其余 → 正常增量。
+        跨周期时把上一段归档进 traffic_hist 再清零，长期不进后台也不会丢数。"""
         n = self.node(nid)
         if not n:
             return None
-        rx_total = max(0, int(rx_total or 0))
-        tx_total = max(0, int(tx_total or 0))
+        try:
+            rx_total = int(rx_total) if rx_total is not None else 0
+            tx_total = int(tx_total) if tx_total is not None else 0
+        except (TypeError, ValueError):
+            return None
+        if rx_total <= 0 and tx_total <= 0:        # 0/0 = 网卡没读到，无效读数
+            return None
+        rx_total = max(0, rx_total)
+        tx_total = max(0, tx_total)
         now = int(time.time())
         cstart, _cend = cycle_bounds((n.get("quota_mode") or "").strip(), n.get("quota_start"), now)
         cyc_start = int(n.get("cyc_start") or 0)
@@ -1016,14 +1028,20 @@ class Store:
             cyc_start = cstart
         if not cyc_start:
             cyc_start = cstart or now
-        d_rx = (rx_total - last_rx) if (last_rx >= 0 and rx_total >= last_rx) else (rx_total if last_rx > 0 else 0)
-        d_tx = (tx_total - last_tx) if (last_tx >= 0 and tx_total >= last_tx) else (tx_total if last_tx > 0 else 0)
-        cyc_rx += max(0, d_rx)
-        cyc_tx += max(0, d_tx)
+        d_rx = counter_delta(last_rx, rx_total)
+        d_tx = counter_delta(last_tx, tx_total)
+        if d_rx is None and d_tx is None:          # 两个方向都是无效读数：整条丢掉
+            return None
+        new_rx = rx_total if d_rx is not None else last_rx     # 无效方向保持原基准
+        new_tx = tx_total if d_tx is not None else last_tx
+        cyc_rx += max(0, d_rx or 0)
+        cyc_tx += max(0, d_tx or 0)
+        if d_rx is not None and last_rx > 0 and rx_total < last_rx:
+            log("流量计数器归零（多半是重启）：%s rx %d → %d" % (nid, last_rx, rx_total))
         with self.lock:
             self.conn.execute("UPDATE nodes SET cyc_start=?,cyc_rx=?,cyc_tx=?,"
                               "last_rx_total=?,last_tx_total=? WHERE id=?",
-                              (cyc_start, cyc_rx, cyc_tx, rx_total, tx_total, nid))
+                              (cyc_start, cyc_rx, cyc_tx, new_rx, new_tx, nid))
             self.conn.commit()
         return archived
 
@@ -1037,10 +1055,16 @@ class Store:
             return {}
         used = int(n.get("cyc_rx") or 0) + int(n.get("cyc_tx") or 0)
         left = max(0, (local_date(cend) - local_date()).days)   # 按日历天数，别用 86400 折算
+        d_end = local_date(cend)
+        # 区间是 [起始日 00:00, 重置日 00:00)：界面上要写成「起始日 → 重置日的前一天」。
+        # 直接用 reset_date 当区间末尾会读成「10 号 → 下月 10 号」，看着像多算一天
+        # （实际 10 号起按月 = 10 号 00:00 ~ 下月 9 号 24:00，那一刻就是下月 10 号 00:00 重置）。
         return {"mode": mode, "unit": UNIT_CN.get(mode, mode), "used": used,
                 "start": cstart, "end": cend,
                 "start_date": local_date(cstart).isoformat(),
-                "reset_date": local_date(cend).isoformat(),   # 这天 00:00 重置
+                "end_date": (d_end - datetime.timedelta(days=1)).isoformat(),  # 周期内最后一天（含）
+                "reset_date": d_end.isoformat(),               # 这天 00:00 重置
+                "reset_at": d_end.isoformat() + " 00:00",
                 "days_left": left}
 
     def lifetime(self, nid):
@@ -1361,6 +1385,34 @@ def add_period(d, unit, n=1):
         except ValueError:                 # 2-29 → 2-28
             return d.replace(year=d.year + n, day=28)
     return add_months(d, n)
+
+
+def counter_delta(last, cur):
+    """累计计数器 → 本次增量。三态：
+
+    - cur <= 0                → None：本次读数无效（agent 读不到网卡会返回 0），不入账、基准不变
+    - last 未知（None/<=0）   → 0：第一次上报，从当前值起步，本次不累加
+                                （⚠ 0 是「未知」哨兵，绝不能拿来做 last，否则 cur-0 就是整条计数器）
+    - cur >= last             → cur - last：正常增量
+    - cur < last 且 cur > 0   → cur：计数器变小 = 重启归零，按从 0 起算
+    """
+    try:
+        cur = int(cur)
+    except (TypeError, ValueError):
+        return None
+    if cur <= 0:
+        return None
+    if last is None:
+        return 0
+    try:
+        last = int(last)
+    except (TypeError, ValueError):
+        return 0
+    if last <= 0:
+        return 0
+    if cur >= last:
+        return cur - last
+    return cur
 
 
 def cycle_bounds(mode, start, now=None):

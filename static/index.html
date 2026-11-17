@@ -485,7 +485,7 @@ function card(n) {
   const cinfo = n.cycle || {};
   const cyc = {
     label: cinfo.unit ? cinfo.unit : "",
-    note: cinfo.reset_date ? `本周期 ${String(cinfo.start_date || "").slice(5)} → ${String(cinfo.reset_date || "").slice(5)} · 剩 ${cinfo.days_left} 天重置` : ""
+    note: cinfo.reset_date ? `本周期 ${String(cinfo.start_date || "").slice(5)} → ${String(cinfo.end_date || cinfo.reset_date).slice(5)} · 剩 ${cinfo.days_left} 天（${String(cinfo.reset_date || "").slice(5)} 00:00 重置）` : ""
   };
   const fam = (n.checks || []).some(c => String(c.family) === "6") ? "v6" : "v4";
   const three = n.three || {targets: {}};
@@ -1098,7 +1098,7 @@ async function loadDetail() {
       ["到期", (CUR.expires_at || "—") + ((CUR.expires && CUR.expires.auto) ? "（自动续）" : "")],
       ["流量配额", CUR.quota_bytes ? fmtBytes(CUR.quota_bytes) : "不限量"],
       ["本周期用量", fmtBytes(CUR.used_bytes) + (CUR.cycle && CUR.cycle.reset_date
-        ? `（${CUR.cycle.start_date} → ${CUR.cycle.reset_date} 重置）` : "")],
+        ? `（${CUR.cycle.start_date} → ${CUR.cycle.end_date || CUR.cycle.reset_date}，${CUR.cycle.reset_date} 00:00 重置）` : "")],
       ["节点 ID", CUR.id]
     ].map(r => `<div class="kv"><span>${r[0]}</span><b>${r[1]}</b></div>`).join("");
   } catch (e) {
