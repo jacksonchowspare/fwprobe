@@ -588,6 +588,10 @@ class TestTrafficAccounting(unittest.TestCase):
         self.st.ingest(self.st.node(self.nid),
                        {"ts": int(time.time()), "net": {"rx_total": rx, "tx_total": tx}}, "1.2.3.4")
 
+    def _report_ts(self, rx, tx, ts):
+        self.st.ingest(self.st.node(self.nid),
+                       {"ts": int(ts), "net": {"rx_total": rx, "tx_total": tx}}, "1.2.3.4")
+
     def test_accumulates_deltas(self):
         self._report(1000, 2000)               # 首报：只记基线
         n = self.st.node(self.nid)
@@ -652,8 +656,44 @@ class TestTrafficAccounting(unittest.TestCase):
         self.assertEqual(P.counter_delta(-1, 500), 0)
         self.assertEqual(P.counter_delta(None, 500), 0)
         self.assertEqual(P.counter_delta(500, 900), 400) # 正常增量
-        self.assertEqual(P.counter_delta(900, 300), 300) # 重启归零
+        self.assertEqual(P.counter_delta(900, 300), 300) # 重启归零（腰斩）
         self.assertEqual(P.counter_delta(900, 900), 0)
+        self.assertEqual(P.counter_delta(1000, 990), 0)  # 小幅回退 = 抖动
+        self.assertEqual(P.counter_delta(1000, 600), 0)  # 只掉四成，仍不算重启
+        self.assertEqual(P.counter_delta(1000, 500), 500)  # 腰斩 = 重启
+
+    def test_small_counter_dip_never_adds_whole_counter(self):
+        """驱动计数器抖一下（掉几百 KB）曾被当成重启，把整条计数器加进本周期。
+
+        实测温哥华：rx 139,877,593,760 → 139,876,848,493（只掉 745KB）→ 记成 139.9GB 用量。
+        """
+        self._report(512_000_000_000, 300_000_000_000)
+        self._report(512_000_050_000, 300_000_040_000)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (50_000, 40_000))
+        self._report(511_999_305_000, 299_999_500_000)   # 只掉 745KB / 540KB
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (50_000, 40_000))     # 不涨
+        self.assertEqual(n["last_rx_total"], 511_999_305_000)              # 基准重设
+        self._report(511_999_405_000, 299_999_600_000)
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (150_000, 140_000))   # 之后照常
+
+    def test_replayed_old_report_is_ignored(self):
+        """agent 断线补发：旧包晚到（计数器更小）不能当成重启归零。"""
+        t0 = int(time.time())
+        self._report_ts(1000, 2000, t0)                  # 基线
+        self._report_ts(5000, 9000, t0 + 30)             # 正常增量 4000/7000
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (4000, 7000))
+        self._report_ts(1200, 2400, t0 + 10)             # 补发的旧包（更早的 ts）
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (4000, 7000))         # 不入账
+        self.assertEqual((n["last_rx_total"], n["last_tx_total"]), (5000, 9000))
+        self.assertEqual(n["last_acct_ts"], t0 + 30)                        # 记账时刻不回退
+        self._report_ts(6000, 10000, t0 + 60)            # 后续新包照常
+        n = self.st.node(self.nid)
+        self.assertEqual((n["cyc_rx"], n["cyc_tx"]), (5000, 8000))
 
     def test_defaults_switch_on(self):
         n = self.st.node(self.nid)

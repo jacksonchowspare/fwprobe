@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.36"
+VERSION = "0.5.37"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -591,7 +591,8 @@ class Store:
                          ("cyc_start", "INTEGER DEFAULT 0"), ("cyc_rx", "INTEGER DEFAULT 0"),
                          ("cyc_tx", "INTEGER DEFAULT 0"),
                          ("last_rx_total", "INTEGER DEFAULT -1"),
-                         ("last_tx_total", "INTEGER DEFAULT -1")):
+                         ("last_tx_total", "INTEGER DEFAULT -1"),
+                         ("last_acct_ts", "INTEGER DEFAULT 0")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {ddl}")
         self.conn.commit()
@@ -918,7 +919,7 @@ class Store:
                      c.get("loss"), c.get("min"), c.get("avg"), c.get("max")))
             net = payload.get("net") or {}
             if net.get("rx_total") is not None or net.get("tx_total") is not None:
-                self.account_traffic(node["id"], net.get("rx_total"), net.get("tx_total"))
+                self.account_traffic(node["id"], net.get("rx_total"), net.get("tx_total"), ts)
             self.conn.execute(
                 "UPDATE nodes SET last_seen=?, os_id=COALESCE(NULLIF(?,''),os_id),"
                 " os_name=COALESCE(NULLIF(?,''),os_name), kernel=COALESCE(NULLIF(?,''),kernel),"
@@ -988,7 +989,7 @@ class Store:
         tx = max(0, (last["tx_total"] or 0) - (first["tx_total"] or 0))
         return rx, tx
 
-    def account_traffic(self, nid, rx_total, tx_total):
+    def account_traffic(self, nid, rx_total, tx_total, rep_ts=None):
         """把 agent 的累计计数器换算成「本周期用量」。
 
         本次读数无效（rx 与 tx 都是 0 = agent 读不到网卡）时整条不计，基准也不动。
@@ -996,7 +997,12 @@ class Store:
         - 基准未知（-1/0/空）→ 本次不累加，只把当前读数立为基准；
         - 计数器变小（新值 > 0）→ 重启归零，按从 0 起算；
         - 其余 → 正常增量。
-        跨周期时把上一段归档进 traffic_hist 再清零，长期不进后台也不会丢数。"""
+        跨周期时把上一段归档进 traffic_hist 再清零，长期不进后台也不会丢数。
+
+        ⚠ 补发/乱序的旧上报不记账（rep_ts 早于已记账时刻就整条跳过）：agent 断线时会把
+        payload 存 spool 目录，恢复后先补发旧包、再发新包 —— 旧包的计数器更小，
+        旧逻辑把它当「重启归零」→ 整条计数器（几百 GB）被当成本次增量记进本周期
+        （v0.5.37 前实测：温哥华 17GB 被记成 617GB，三包补发各加一份）。"""
         n = self.node(nid)
         if not n:
             return None
@@ -1010,6 +1016,16 @@ class Store:
         rx_total = max(0, rx_total)
         tx_total = max(0, tx_total)
         now = int(time.time())
+        try:
+            rep_ts = int(rep_ts) if rep_ts else now
+        except (TypeError, ValueError):
+            rep_ts = now
+        last_acct = int(n.get("last_acct_ts") or 0)
+        if last_acct and rep_ts < last_acct:       # 补发/乱序的旧包：计数器只会更小
+            log("跳过乱序上报（不记账）：%s 包内时间 %d < 已记账 %d"
+                % (nid, rep_ts, last_acct))
+            return None
+
         cstart, _cend = cycle_bounds((n.get("quota_mode") or "").strip(), n.get("quota_start"), now)
         cyc_start = int(n.get("cyc_start") or 0)
         cyc_rx = int(n.get("cyc_rx") or 0)
@@ -1037,11 +1053,16 @@ class Store:
         cyc_rx += max(0, d_rx or 0)
         cyc_tx += max(0, d_tx or 0)
         if d_rx is not None and last_rx > 0 and rx_total < last_rx:
-            log("流量计数器归零（多半是重启）：%s rx %d → %d" % (nid, last_rx, rx_total))
+            if rx_total <= last_rx // 2:
+                log("流量计数器归零（多半是重启）：%s rx %d → %d" % (nid, last_rx, rx_total))
+            else:
+                log("计数器小幅回退（读数抖动，不入账）：%s rx %d → %d"
+                    % (nid, last_rx, rx_total))
         with self.lock:
             self.conn.execute("UPDATE nodes SET cyc_start=?,cyc_rx=?,cyc_tx=?,"
-                              "last_rx_total=?,last_tx_total=? WHERE id=?",
-                              (cyc_start, cyc_rx, cyc_tx, new_rx, new_tx, nid))
+                              "last_rx_total=?,last_tx_total=?,last_acct_ts=? WHERE id=?",
+                              (cyc_start, cyc_rx, cyc_tx, new_rx, new_tx,
+                               max(last_acct, rep_ts), nid))
             self.conn.commit()
         return archived
 
@@ -1394,7 +1415,12 @@ def counter_delta(last, cur):
     - last 未知（None/<=0）   → 0：第一次上报，从当前值起步，本次不累加
                                 （⚠ 0 是「未知」哨兵，绝不能拿来做 last，否则 cur-0 就是整条计数器）
     - cur >= last             → cur - last：正常增量
-    - cur < last 且 cur > 0   → cur：计数器变小 = 重启归零，按从 0 起算
+    - cur < last 且腰斩（<= last/2）→ cur：计数器变小 = 重启归零，按从 0 起算
+    - cur < last 但只掉一点   → 0：读数抖动 / 乱序旧包，不能把整条计数器当增量
+
+    ⚠ 最后这条是「腰斩才算重启」的判据：重启后计数器从 0 起，必然远小于 last；
+    只回退几 MB/几百 MB 的是驱动计数器抖动（或补发的旧包），旧逻辑一律当重启、
+    直接把 cur（=整条计数器，几百 GB）加进本周期 —— 实测一台 17GB 的机器被记成 617GB。
     """
     try:
         cur = int(cur)
@@ -1412,7 +1438,9 @@ def counter_delta(last, cur):
         return 0
     if cur >= last:
         return cur - last
-    return cur
+    if cur <= last // 2:            # 腰斩以上 = 真的重启归零
+        return cur
+    return 0                        # 小幅回退：不入账，基准会在调用处重设成 cur
 
 
 def cycle_bounds(mode, start, now=None):

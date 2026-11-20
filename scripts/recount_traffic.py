@@ -41,9 +41,15 @@ def recount(conn, nid, since=None):
         if first_ts is None:
             first_ts = ts
         if r > 0 and last_rx is not None:
-            rx += (r - last_rx) if r >= last_rx else r
+            if r >= last_rx:
+                rx += r - last_rx
+            elif r <= last_rx // 2:       # 腰斩 = 重启归零；小幅回退是抖动，不入账
+                rx += r
         if t > 0 and last_tx is not None:
-            tx += (t - last_tx) if t >= last_tx else t
+            if t >= last_tx:
+                tx += t - last_tx
+            elif t <= last_tx // 2:
+                tx += t
         if r > 0:
             last_rx = r
         if t > 0:
