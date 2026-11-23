@@ -302,6 +302,16 @@ class TestStaticPage(unittest.TestCase):
         self.assertIn("relayoutStrips();", self.src)
         self.assertNotIn(".cells{display:flex", self.src)   # 旧的 flex 格子实现已废弃
 
+    def test_favicon_declared(self):
+        """两个页面都要声明 favicon，且图标文件真的在 static/ 里（只写 <link> 会 404 变空白）"""
+        static = pathlib.Path(P.__file__).with_name("static")
+        self.assertIn('<link rel="icon" href="/favicon.ico"', self.src)
+        admin = (static / "admin.html").read_text("utf-8")
+        self.assertIn('<link rel="icon" href="/favicon.ico"', admin)
+        ico = static / "favicon.ico"
+        self.assertTrue(ico.exists(), "static/favicon.ico 缺失")
+        self.assertEqual(ico.read_bytes()[:4], b"\x00\x00\x01\x00", "favicon.ico 不是合法 ICO")
+
 
 class TestCountryDetect(unittest.TestCase):
     """归属地识别：多源兜底 + 失败退避重试（旧版一次失败就永久拉黑，节点 country 一直空）"""

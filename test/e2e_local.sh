@@ -38,6 +38,11 @@ FWPROBE_SERVER="http://127.0.0.1:$PORT" FWPROBE_TOKEN="$TOKEN" python3 agent.py 
 echo "== 公开摘要 =="
 curl -s -m 5 "http://127.0.0.1:$PORT/api/public/summary" | python3 -m json.tool | head -60
 
+echo "== favicon =="
+FAV_CODE=$(curl -s -o "$TMPD/fav.ico" -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/favicon.ico")
+FAV_TYPE=$(curl -s -o /dev/null -w '%{content_type}' -m 5 "http://127.0.0.1:$PORT/favicon.ico")
+echo "HTTP $FAV_CODE · $FAV_TYPE · $(wc -c < "$TMPD/fav.ico") bytes"
+
 echo "== 断言 =="
 curl -s -m 5 "http://127.0.0.1:$PORT/api/public/summary" -o "$TMPD/summary.json"
 python3 - "$TMPD/summary.json" <<'PY'
@@ -60,5 +65,7 @@ print("结果:", sum(1 for _, c in ok if c), "通过,", sum(1 for _, c in ok if 
 sys.exit(0 if all(c for _, c in ok) else 1)
 PY
 RC=$?
+if [ "$FAV_CODE" = "200" ]; then echo "  ✓ favicon 200"; else echo "  ✗ favicon $FAV_CODE"; RC=1; fi
+case "$FAV_TYPE" in image/x-icon*) echo "  ✓ favicon content-type $FAV_TYPE";; *) echo "  ✗ favicon content-type $FAV_TYPE"; RC=1;; esac
 echo "== 服务日志（末尾） =="; tail -5 "$TMPD/serve.log"
 exit $RC

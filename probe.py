@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.37"
+VERSION = "0.5.38"
 APP_NAME = "iProbe"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1721,10 +1721,16 @@ class Handler(BaseHTTPRequestHandler):
                     tally[g] = tally.get(g, 0) + 1
             return self._send(200, {"groups": [{"name": k, "count": v}
                                                for k, v in sorted(tally.items())]})
+        if path == "/favicon.ico":
+            # 浏览器默认就会请求根路径的 /favicon.ico（不读 <link>），必须单独给路由
+            return self._serve_static("favicon.ico", "image/x-icon")
         if path.startswith("/static/"):
             name = os.path.basename(path)
             ctype = "application/javascript" if name.endswith(".js") else \
-                "text/css" if name.endswith(".css") else "application/octet-stream"
+                "text/css" if name.endswith(".css") else \
+                "image/x-icon" if name.endswith(".ico") else \
+                "image/png" if name.endswith(".png") else \
+                "application/octet-stream"
             return self._serve_static(name, ctype)
         if path == "/api/public/summary":
             return self._send(200, public_summary(self.store))
